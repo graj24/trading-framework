@@ -175,8 +175,10 @@ def train():
     import yaml
     with open("config.yaml") as f:
         config = yaml.safe_load(f)
-    watchlist = config["watchlist"]
 
+    # Train on ALL available stocks, not just watchlist
+    all_parquets = sorted(Path("stocks").glob("*/price_history.parquet"))
+    watchlist = [p.parent.name for p in all_parquets]
     print(f"Building dataset for {len(watchlist)} stocks...")
 
     all_X, all_y = [], []
