@@ -47,7 +47,9 @@ def main():
 
     master = MasterAgent(config)
     from agents.execution_agent import ExecutionAgent, _get_ltp, _pnl
+    from agents.learning_agent import LearningAgent
     executor = ExecutionAgent(config)
+    learner  = LearningAgent(config)
 
     executed = []
 
@@ -58,7 +60,20 @@ def main():
         d = result.data
         logger.info(f"{symbol}: {d['decision']} (conf={d['confidence']}%) — {d['reasoning']}")
 
-        if d["decision"] == "BUY" and d.get("entry_price", 0) > 0:
+        if d["decision"] == "BUY" and d.get("entry_price", 0) > 0 and d.get("position_size", 0) > 0:
+            # Skip if already holding this symbol
+            import sqlite3
+            from pathlib import Path
+            db = Path("paper_trades.db")
+            if db.exists():
+                conn = sqlite3.connect(db)
+                existing = conn.execute(
+                    "SELECT id FROM trades WHERE symbol=? AND outcome='open'", (symbol,)
+                ).fetchone()
+                conn.close()
+                if existing:
+                    logger.info(f"  → {symbol}: position already open, skipping")
+                    continue
             trade = executor.execute_trade(
                 symbol=symbol,
                 entry_price=d["entry_price"],
@@ -114,6 +129,15 @@ def main():
             wins = [t for t in closed_trades if t["pnl_inr"] and t["pnl_inr"] > 0]
             print(f"  Win rate          : {len(wins)}/{len(closed_trades)} ({len(wins)/len(closed_trades)*100:.0f}%)")
             print(f"  Total realised P&L: ₹{total_realised:+,.2f}")
+            # Update signal weights from closed trades
+            for t in closed_trades:
+                outcome = "win" if t["pnl_inr"] and t["pnl_inr"] > 0 else "loss"
+                learner.update_weights(t["symbol"], outcome, {
+                    "technical_score": t.get("technical_score", 0),
+                    "news_sentiment":  t.get("sentiment", 0),
+                    "pattern_ev":      t.get("pattern_ev", 0),
+                })
+                logger.info(f"  → LearningAgent updated weights for {t['symbol']} ({outcome})")
         conn.close()
     else:
         print(f"\n  No trade history yet.")

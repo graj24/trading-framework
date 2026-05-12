@@ -50,19 +50,29 @@ def _llm_decision(symbol: str, price: float, scores: dict, rag: dict, config: di
         import litellm
         llm_cfg = config.get("llm", {})
 
+        # Pull recent headlines and extra fundamentals from KB
+        from core.knowledge_base import read_kb
+        news_kb   = read_kb(symbol, "news_history.json")
+        recent_headlines = [n["headline"] for n in news_kb.get("news", [])[-5:]]
+        fund      = read_kb(symbol, "fundamentals.json")
+        corr_kb   = read_kb(symbol, "sector_correlation.json")
+        top_corr  = sorted(corr_kb.get("correlations", {}).items(), key=lambda x: abs(x[1]), reverse=True)[:2]
+
         prompt = f"""You are an expert Indian stock trader. Make a trading decision based on the data below.
 Return ONLY valid JSON with no markdown: {{"decision": "BUY|SELL|HOLD", "confidence": 0-100, "entry": {price}, "stop_loss": 0.0, "target": 0.0, "reasoning": "one sentence"}}
 
-STOCK: {symbol}
-CURRENT PRICE: {price}
-TECHNICAL SCORE: {scores.get('technical_score', 0)}/10 (RSI: {scores.get('rsi', 0):.1f}, MACD: {scores.get('macd_signal', 'N/A')})
+STOCK: {symbol} | {fund.get('company_name','')} | {fund.get('sector','')} / {fund.get('industry','')}
+CURRENT PRICE: ₹{price} | 52W High: ₹{fund.get('52w_high','N/A')} | 52W Low: ₹{fund.get('52w_low','N/A')}
+VALUATION: PE={fund.get('pe_ratio','N/A')} | Fwd PE={fund.get('forward_pe','N/A')} | P/B={fund.get('price_to_book','N/A')} | ROE={fund.get('roe','N/A')}
+GROWTH: Revenue={fund.get('revenue_growth','N/A')} | Earnings={fund.get('earnings_growth','N/A')} | EPS=₹{fund.get('eps','N/A')}
+TECHNICAL SCORE: {scores.get('technical_score', 0)}/10 | RSI: {scores.get('rsi', 0):.1f} | MACD: {scores.get('macd_signal', 'N/A')} | Trend: {scores.get('trend','N/A')} | Volume: {scores.get('volume_ratio',1):.1f}×avg
+INTRADAY (5m): RSI={scores.get('intraday_rsi5','N/A')} | MACD={scores.get('intraday_macd','N/A')} | Score={scores.get('intraday_score','N/A')}/3 | vs VWAP=₹{scores.get('intraday_vs_vwap','N/A')}
 NEWS SENTIMENT: {scores.get('sentiment', 0):.2f} (Tier: {scores.get('tier', 'None')})
+RECENT HEADLINES: {' | '.join(recent_headlines) if recent_headlines else 'None'}
 PATTERN EV: {scores.get('pattern_ev', 0):.2f}% (Win rate: {scores.get('win_rate', 0):.0f}%)
 MARKET REGIME: {scores.get('regime', 'unknown')}
-SECTOR: {rag.get('sector', 'Unknown')}
-PE RATIO: {rag.get('pe_ratio', 'N/A')}
-EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%
-SIGNAL WEIGHTS: {json.dumps(rag.get('signal_weights', {}), default=str)[:200]}"""
+CORRELATIONS: {dict(top_corr)}
+EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
 
         response = litellm.completion(
             model=llm_cfg.get("model", "groq/llama-3.3-70b-versatile"),
@@ -219,6 +229,10 @@ class MasterAgent(Agent):
             "macd_signal": tech.get("macd_signal", "neutral"),
             "trend": tech.get("trend", "sideways"),
             "volume_ratio": tech.get("volume_ratio", 1.0),
+            "intraday_rsi5":   tech.get("intraday_rsi5"),
+            "intraday_macd":   tech.get("intraday_macd"),
+            "intraday_score":  tech.get("intraday_score"),
+            "intraday_vs_vwap": tech.get("intraday_vs_vwap"),
             "sentiment": news.get("sentiment", 0),
             "tier": news.get("tier"),
             "pattern_ev": pattern.get("expected_value", 0),
@@ -250,6 +264,19 @@ class MasterAgent(Agent):
         if confidence < 60 and decision == "BUY":
             decision = "HOLD"
             reasoning = f"Confidence too low ({confidence}%) — holding"
+
+        # 7b. Hard filter gate — backtest-validated: uptrend + MACD bullish + volume >= 1×avg
+        if decision == "BUY":
+            trend       = scores.get("trend", "sideways")
+            macd_signal = scores.get("macd_signal", "neutral")
+            vol_ratio   = scores.get("volume_ratio", 1.0)
+            if trend != "up" or macd_signal != "bullish" or vol_ratio < 1.0:
+                blocked = []
+                if trend != "up":           blocked.append(f"trend={trend}")
+                if macd_signal != "bullish": blocked.append(f"MACD={macd_signal}")
+                if vol_ratio < 1.0:         blocked.append(f"vol={vol_ratio:.1f}×")
+                decision = "HOLD"
+                reasoning = f"LLM said BUY but filters blocked: {', '.join(blocked)}"
 
         # 8. Risk manager for position sizing
         position_size = 0.0
