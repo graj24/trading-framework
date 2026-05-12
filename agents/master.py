@@ -70,6 +70,7 @@ INTRADAY (5m): RSI={scores.get('intraday_rsi5','N/A')} | MACD={scores.get('intra
 NEWS SENTIMENT: {scores.get('sentiment', 0):.2f} (Tier: {scores.get('tier', 'None')})
 RECENT HEADLINES: {' | '.join(recent_headlines) if recent_headlines else 'None'}
 PATTERN EV: {scores.get('pattern_ev', 0):.2f}% (Win rate: {scores.get('win_rate', 0):.0f}%)
+ML MODEL: signal={scores.get('ml_signal','N/A')} probability={scores.get('ml_proba','N/A')}
 MARKET REGIME: {scores.get('regime', 'unknown')}
 CORRELATIONS: {dict(top_corr)}
 EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
@@ -135,12 +136,24 @@ def _rule_based_decision(price: float, scores: dict) -> dict:
     pat_norm     = min(100, max(0, 50 + pattern_ev * 5))  # centre at 50, ±10% EV = ±50pts
     winrate_norm = win_rate                            # already 0-100
 
-    composite = (
-        tech_norm    * tech_weight +
-        sent_norm    * sent_weight +
-        pat_norm     * pat_weight * 0.7 +
-        winrate_norm * pat_weight * 0.3
-    )
+    # ML probability (0-1) → 0-100, weighted heavily if available
+    ml_proba = scores.get("ml_proba")
+    if ml_proba is not None:
+        ml_norm = ml_proba * 100
+        composite = (
+            tech_norm    * tech_weight  * 0.6 +
+            sent_norm    * sent_weight  * 0.6 +
+            pat_norm     * pat_weight   * 0.7 * 0.6 +
+            winrate_norm * pat_weight   * 0.3 * 0.6 +
+            ml_norm      * 0.4                        # ML gets 40% weight
+        )
+    else:
+        composite = (
+            tech_norm    * tech_weight +
+            sent_norm    * sent_weight +
+            pat_norm     * pat_weight * 0.7 +
+            winrate_norm * pat_weight * 0.3
+        )
 
     # Minimum bars: tech must clear regime threshold, sentiment must not be strongly negative
     # + backtest-validated filters: uptrend (above EMA50), MACD bullish, volume > 1.5× avg
@@ -239,6 +252,18 @@ class MasterAgent(Agent):
             "win_rate": pattern.get("win_rate", 50),
             "regime": regime.get("regime", "unknown"),
         }
+
+        # ML signal
+        try:
+            from ml_model import predict as ml_predict
+            ml = ml_predict(symbol)
+            scores["ml_proba"]  = ml["ml_proba"]
+            scores["ml_signal"] = ml["ml_signal"]
+            logger.info(f"{symbol}: ML signal={ml['ml_signal']} proba={ml['ml_proba']:.3f}")
+        except Exception as e:
+            logger.debug(f"ML predict skipped: {e}")
+            scores["ml_proba"]  = None
+            scores["ml_signal"] = None
 
         # 4. Emergency override: TIER 1 news + FinBERT confirms negative sentiment
         if scores["tier"] == 1 and scores["sentiment"] < -0.2:
