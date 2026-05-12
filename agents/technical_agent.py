@@ -190,6 +190,9 @@ class TechnicalAgent(Agent):
             high.iloc[-1] >= high_20.iloc[-2] and volume.iloc[-1] > vol_avg_20.iloc[-1]
         )
 
+        vol_avg20 = volume.rolling(20).mean().iloc[-1]
+        volume_ratio = round(float(volume.iloc[-1] / vol_avg20), 2) if vol_avg20 > 0 else 1.0
+
         data = {
             "symbol": symbol,
             "technical_score": score,
@@ -205,6 +208,8 @@ class TechnicalAgent(Agent):
             "adx": round(float(adx), 2),
             "atr": round(float(atr), 2),
             "price": round(float(price), 2),
+            "volume_ratio": volume_ratio,
+            "current_price": round(float(price), 2),
         }
         return self._result(data)
 

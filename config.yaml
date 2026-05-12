@@ -6,9 +6,8 @@ data:
   - 15m
   - 5m
 llm:
-  litellm_base_url: http://localhost:4000
+  model: groq/llama-3.3-70b-versatile
   max_tokens: 2000
-  model: deepseek
   temperature: 0.1
 logging:
   backup_count: 5

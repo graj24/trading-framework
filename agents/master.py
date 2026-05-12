@@ -65,8 +65,7 @@ EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%
 SIGNAL WEIGHTS: {json.dumps(rag.get('signal_weights', {}), default=str)[:200]}"""
 
         response = litellm.completion(
-            model="openai/deepseek",
-            api_base=llm_cfg.get("litellm_base_url", "http://localhost:4000"),
+            model=llm_cfg.get("model", "groq/llama-3.3-70b-versatile"),
             messages=[{"role": "user", "content": prompt}],
             temperature=llm_cfg.get("temperature", 0.1),
             max_tokens=200,
@@ -85,29 +84,88 @@ SIGNAL WEIGHTS: {json.dumps(rag.get('signal_weights', {}), default=str)[:200]}""
 
 def _rule_based_decision(price: float, scores: dict) -> dict:
     """Fallback rule-based decision when LLM is unavailable."""
-    tech = scores.get("technical_score", 0)
-    sentiment = scores.get("sentiment", 0)
-    pattern_ev = scores.get("pattern_ev", 0)
+    tech = scores.get("technical_score", 0)          # 0-10
+    sentiment = scores.get("sentiment", 0)            # -1 to +1
+    pattern_ev = scores.get("pattern_ev", 0)          # % expected value
+    win_rate = scores.get("win_rate", 50)             # 0-100
     regime = scores.get("regime", "unknown")
     tier = scores.get("tier")
 
-    if tier == 1:
+    # FIX 2: Softer TIER 1 — only emergency-skip if FinBERT also confirms negative sentiment
+    if tier == 1 and sentiment < -0.2:
         return {"decision": "SKIP", "confidence": 95, "entry": price,
-                "stop_loss": 0.0, "target": 0.0, "reasoning": "TIER 1 news emergency"}
+                "stop_loss": 0.0, "target": 0.0, "reasoning": "TIER 1 news + negative sentiment confirmed"}
 
-    if tech >= 7 and sentiment >= 0 and pattern_ev > 0 and regime != "trending_bear":
+    # Hard skip: truly bearish regime with negative sentiment
+    if regime == "trending_bear" and sentiment < -0.3:
+        return {"decision": "SKIP", "confidence": 80, "entry": price,
+                "stop_loss": 0.0, "target": 0.0, "reasoning": "Trending bear regime + negative sentiment"}
+
+    # FIX 3: Regime-relative technical threshold
+    # In weak regimes, lower the bar for tech score and weight sentiment/pattern more
+    if regime in ("ranging", "high_volatility"):
+        tech_threshold = 4      # relaxed from 7
+        tech_weight    = 0.20   # de-emphasise technicals
+        sent_weight    = 0.45
+        pat_weight     = 0.35
+    elif regime == "trending_bear":
+        tech_threshold = 6
+        tech_weight    = 0.30
+        sent_weight    = 0.40
+        pat_weight     = 0.30
+    else:  # trending_bull or unknown
+        tech_threshold = 6
+        tech_weight    = 0.40
+        sent_weight    = 0.30
+        pat_weight     = 0.30
+
+    # FIX 1: Weighted composite score (0-100)
+    tech_norm    = (tech / 10) * 100
+    sent_norm    = (sentiment + 1) / 2 * 100          # map -1..+1 → 0..100
+    pat_norm     = min(100, max(0, 50 + pattern_ev * 5))  # centre at 50, ±10% EV = ±50pts
+    winrate_norm = win_rate                            # already 0-100
+
+    composite = (
+        tech_norm    * tech_weight +
+        sent_norm    * sent_weight +
+        pat_norm     * pat_weight * 0.7 +
+        winrate_norm * pat_weight * 0.3
+    )
+
+    # Minimum bars: tech must clear regime threshold, sentiment must not be strongly negative
+    # + backtest-validated filters: uptrend (above EMA50), MACD bullish, volume > 1.5× avg
+    trend        = scores.get("trend", "sideways")
+    macd_signal  = scores.get("macd_signal", "neutral")
+    volume_ratio = scores.get("volume_ratio", 1.0)
+
+    filters_pass = (
+        trend == "up" and
+        macd_signal == "bullish" and
+        volume_ratio >= 1.0
+    )
+
+    if tech >= tech_threshold and sentiment >= -0.1 and composite >= 55 and filters_pass:
         sl = round(price * 0.99, 2)
         target = round(price * 1.025, 2)
-        confidence = min(95, int(tech * 8 + sentiment * 10 + pattern_ev * 5))
+        confidence = min(95, int(composite))
         return {"decision": "BUY", "confidence": confidence, "entry": price,
-                "stop_loss": sl, "target": target, "reasoning": "Strong technical + positive sentiment + positive pattern EV"}
+                "stop_loss": sl, "target": target,
+                "reasoning": f"Composite score {composite:.0f}/100 (tech={tech}, sent={sentiment:.2f}, pat_ev={pattern_ev:.1f}%)"}
 
-    if tech <= 3 or sentiment <= -0.5:
+    if composite < 35 or sentiment <= -0.5:
         return {"decision": "SKIP", "confidence": 70, "entry": price,
-                "stop_loss": 0.0, "target": 0.0, "reasoning": "Weak technicals or negative sentiment"}
+                "stop_loss": 0.0, "target": 0.0,
+                "reasoning": f"Weak composite {composite:.0f}/100 or negative sentiment"}
 
-    return {"decision": "HOLD", "confidence": 50, "entry": price,
-            "stop_loss": 0.0, "target": 0.0, "reasoning": "Mixed signals, no clear edge"}
+    # Composite ok but filters didn't pass — explain why
+    filter_reasons = []
+    if trend != "up":           filter_reasons.append(f"trend={trend}")
+    if macd_signal != "bullish": filter_reasons.append(f"MACD={macd_signal}")
+    if volume_ratio < 1.0:      filter_reasons.append(f"vol={volume_ratio:.1f}×avg")
+
+    hold_reason = f"Composite {composite:.0f}/100 but filters: {', '.join(filter_reasons)}" if filter_reasons else f"Mixed signals — composite {composite:.0f}/100"
+    return {"decision": "HOLD", "confidence": int(composite), "entry": price,
+            "stop_loss": 0.0, "target": 0.0, "reasoning": hold_reason}
 
 
 class MasterAgent(Agent):
@@ -159,6 +217,8 @@ class MasterAgent(Agent):
             "technical_score": tech.get("technical_score", 0),
             "rsi": tech.get("rsi", 50),
             "macd_signal": tech.get("macd_signal", "neutral"),
+            "trend": tech.get("trend", "sideways"),
+            "volume_ratio": tech.get("volume_ratio", 1.0),
             "sentiment": news.get("sentiment", 0),
             "tier": news.get("tier"),
             "pattern_ev": pattern.get("expected_value", 0),
@@ -166,13 +226,13 @@ class MasterAgent(Agent):
             "regime": regime.get("regime", "unknown"),
         }
 
-        # 4. Emergency override: TIER 1 news
-        if scores["tier"] == 1:
-            logger.warning(f"{symbol}: TIER 1 news detected — emergency skip")
+        # 4. Emergency override: TIER 1 news + FinBERT confirms negative sentiment
+        if scores["tier"] == 1 and scores["sentiment"] < -0.2:
+            logger.warning(f"{symbol}: TIER 1 news + negative sentiment — emergency skip")
             return self._result({
                 "symbol": symbol, "decision": "SKIP", "confidence": 95,
                 "entry_price": price, "stop_loss": 0.0, "target": 0.0,
-                "position_size": 0.0, "reasoning": "TIER 1 emergency news",
+                "position_size": 0.0, "reasoning": "TIER 1 emergency news + negative sentiment confirmed",
                 "agent_scores": scores,
             })
 

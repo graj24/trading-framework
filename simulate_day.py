@@ -51,15 +51,15 @@ df = df.dropna(subset=["Close", "Open", "High", "Low"])
 
 # ── Find the biggest single-day move ─────────────────────────────────────────
 df["day_return"] = df["Close"].pct_change() * 100
-# Find the most recent big move (>= 5%)
-big_moves = df[df["day_return"] >= 5.0].tail(10)
+# Find the biggest single-day move (>= 15%) in full history
+big_moves = df[df["day_return"] >= 15.0]
 
 if big_moves.empty:
-    # Use the biggest move in last 60 days
-    big_moves = df.tail(60).nlargest(1, "day_return")
+    # Fall back to the single largest day ever
+    big_moves = df.nlargest(1, "day_return")
 
-# Use the most recent big move
-move_day = big_moves.index[-1]
+# Use the largest move
+move_day = big_moves["day_return"].idxmax()
 move_day_idx = df.index.get_loc(move_day)
 prev_day_idx = move_day_idx - 1
 prev_day = df.index[prev_day_idx]
