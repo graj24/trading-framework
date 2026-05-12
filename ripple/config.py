@@ -5,4 +5,4 @@ load_dotenv()
 
 class Config:
     DEFAULT_MAX_TWEETS = int(os.getenv("DEFAULT_MAX_TWEETS", 10))
-    OUTPUT_DIR = os.getenv("OUTPUT_DIR", "/Users/anantamanoranjan/Desktop/ripple/output")
+    OUTPUT_DIR = os.getenv("OUTPUT_DIR", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output"))
