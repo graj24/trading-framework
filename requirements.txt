@@ -1,0 +1,32 @@
+# Core
+litellm==1.40.0
+python-dotenv==1.0.1
+PyYAML==6.0.1
+
+# Data
+yfinance==0.2.40
+nsepy==0.8
+requests==2.32.3
+beautifulsoup4==4.12.3
+pyarrow==16.1.0
+
+# Technical Analysis
+pandas-ta==0.3.14b0
+pandas==2.2.2
+numpy==1.26.4
+
+# Pattern Matching
+dtaidistance==2.3.12
+scikit-learn==1.5.0
+
+# Storage
+SQLAlchemy==2.0.30
+
+# Scheduling
+APScheduler==3.10.4
+
+# Alerts
+python-telegram-bot==21.3
+
+# Broker (optional, install when ready)
+# kiteconnect==5.0.1

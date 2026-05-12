@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Virtual environment
+.venv/
+
+# Logs
+logs/
+
+# Database
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Stock data (regenerable)
+stocks/
+
+# IDE
+.idea/
+.vscode/

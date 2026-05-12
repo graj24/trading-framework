@@ -1,0 +1,59 @@
+data:
+  history_years: 5
+  timeframes:
+  - 1d
+  - 1h
+  - 15m
+  - 5m
+llm:
+  litellm_base_url: http://localhost:4000
+  max_tokens: 2000
+  model: deepseek
+  temperature: 0.1
+logging:
+  backup_count: 5
+  file: logs/trading.log
+  level: INFO
+  max_bytes: 10485760
+risk:
+  close_all_time: '15:00'
+  kelly_fraction: 0.5
+  max_loss_per_day_pct: 3.0
+  max_loss_per_month_pct: 15.0
+  max_loss_per_trade_pct: 1.0
+  max_loss_per_week_pct: 7.0
+  max_open_positions: 3
+  trailing_stop_distance_pct: 0.5
+  trailing_stop_trigger_pct: 1.0
+schedule:
+  intraday_interval_minutes: 5
+  market_open_execute: 09:15
+  market_open_signals: 09:00
+  post_market: '15:30'
+  pre_market_analysis: 08:30
+  pre_market_data: 06:00
+telegram:
+  enabled: false
+trading:
+  capital: 10000
+  currency: INR
+  mode: paper
+watchlist:
+- HDFCBANK
+- INFY
+- TITAN
+- RELIANCE
+- TCS
+- TATACONSUM
+- INDIGO
+- SBIN
+- ETERNAL
+
+core_watchlist:
+- RELIANCE
+- INFY
+- TCS
+- HDFCBANK
+- TITAN
+
+watchlist_max: 20
