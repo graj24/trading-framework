@@ -1,19 +1,20 @@
 import json
+import os
 from datetime import datetime
 from typing import Dict, List
 
-from .twitter_collector import StockDataCollector as TwitterCollector
+from .data_collector import StockDataCollector
 from .sentiment_analyzer import SentimentAnalyzer
 
 class StockSentimentPipeline:
     def __init__(self):
-        self.twitter = TwitterCollector()
+        self.collector = StockDataCollector()
         self.analyzer = SentimentAnalyzer()
     
     def run(self, stock_symbol: str, max_tweets: int = 10) -> Dict:
         """Run the complete sentiment analysis pipeline."""
         print(f"Fetching tweets for ${stock_symbol}...")
-        tweets = self.twitter.search_stock_tweets(stock_symbol, max_tweets)
+        tweets = self.collector.search_stock_tweets(stock_symbol, max_tweets)
         
         if not tweets:
             return {"error": f"No tweets found for ${stock_symbol}"}
@@ -67,10 +68,10 @@ class StockSentimentPipeline:
         if filename is None:
             filename = f"sentiment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
-        filepath = f"/Users/anantamanoranjan/Desktop/ripple/output/{filename}"
+        from .config import Config
+        filepath = os.path.join(Config.OUTPUT_DIR, filename)
         
         # Create output directory if needed
-        import os
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         with open(filepath, 'w') as f:
