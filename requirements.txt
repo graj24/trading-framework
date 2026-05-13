@@ -25,6 +25,9 @@ SQLAlchemy==2.0.30
 # Scheduling
 APScheduler==3.10.4
 
+# Analysis
+graphifyy==0.4.2
+
 # Alerts
 python-telegram-bot==21.3
 
