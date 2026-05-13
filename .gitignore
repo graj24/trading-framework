@@ -17,6 +17,7 @@ __pycache__/
 
 # Stock data (regenerable)
 stocks/
+stocks_1h/
 
 # IDE
 .idea/
