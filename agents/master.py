@@ -71,6 +71,7 @@ NEWS SENTIMENT: {scores.get('sentiment', 0):.2f} (Tier: {scores.get('tier', 'Non
 RECENT HEADLINES: {' | '.join(recent_headlines) if recent_headlines else 'None'}
 PATTERN EV: {scores.get('pattern_ev', 0):.2f}% (Win rate: {scores.get('win_rate', 0):.0f}%)
 ML MODEL: signal={scores.get('ml_signal','N/A')} probability={scores.get('ml_proba','N/A')}
+INDIA INTRADAY ML (1h): signal={scores.get('intraday_ml_signal','N/A')} probability={scores.get('intraday_ml_proba','N/A')} (dynamic threshold={scores.get('intraday_threshold',0.55)}, VIX={scores.get('vix_live','N/A')})
 MARKET REGIME: {scores.get('regime', 'unknown')}
 CORRELATIONS: {dict(top_corr)}
 EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
@@ -137,15 +138,26 @@ def _rule_based_decision(price: float, scores: dict) -> dict:
     winrate_norm = win_rate                            # already 0-100
 
     # ML probability (0-1) → 0-100, weighted heavily if available
-    ml_proba = scores.get("ml_proba")
-    if ml_proba is not None:
+    ml_proba         = scores.get("ml_proba")
+    intraday_ml_prob = scores.get("intraday_ml_proba")
+
+    if ml_proba is not None and intraday_ml_prob is not None:
+        ml_norm = (ml_proba * 0.5 + intraday_ml_prob * 0.5) * 100  # average both models
+        composite = (
+            tech_norm    * tech_weight  * 0.6 +
+            sent_norm    * sent_weight  * 0.6 +
+            pat_norm     * pat_weight   * 0.7 * 0.6 +
+            winrate_norm * pat_weight   * 0.3 * 0.6 +
+            ml_norm      * 0.4
+        )
+    elif ml_proba is not None:
         ml_norm = ml_proba * 100
         composite = (
             tech_norm    * tech_weight  * 0.6 +
             sent_norm    * sent_weight  * 0.6 +
             pat_norm     * pat_weight   * 0.7 * 0.6 +
             winrate_norm * pat_weight   * 0.3 * 0.6 +
-            ml_norm      * 0.4                        # ML gets 40% weight
+            ml_norm      * 0.4
         )
     else:
         composite = (
@@ -253,7 +265,7 @@ class MasterAgent(Agent):
             "regime": regime.get("regime", "unknown"),
         }
 
-        # ML signal
+        # ML signal (daily global model)
         try:
             from ml_model import predict as ml_predict
             ml = ml_predict(symbol)
@@ -264,6 +276,46 @@ class MasterAgent(Agent):
             logger.debug(f"ML predict skipped: {e}")
             scores["ml_proba"]  = None
             scores["ml_signal"] = None
+
+        # India intraday model (1h, NSE-specific)
+        try:
+            from india_intraday_model import predict as intraday_predict, dynamic_threshold
+            intra = intraday_predict(symbol)
+
+            # Compute dynamic threshold from current conditions
+            import yfinance as _yf
+            vix_val = 16.0
+            try:
+                vix_df = _yf.Ticker("^INDIAVIX").history(period="2d")
+                if not vix_df.empty:
+                    vix_val = float(vix_df["Close"].iloc[-1])
+            except Exception:
+                pass
+
+            from india_intraday_model import _fo_expiry_days
+            import pandas as _pd
+            fo_days = int(_fo_expiry_days(_pd.DatetimeIndex([_pd.Timestamp.now()])).iloc[0])
+            dyn_thresh = dynamic_threshold(
+                vix=vix_val,
+                regime=scores.get("regime", "unknown"),
+                hour=_pd.Timestamp.now().hour,
+                fo_days=fo_days,
+            )
+            # Override signal based on dynamic threshold
+            intra_signal = "BUY" if intra["intraday_proba"] >= dyn_thresh else \
+                           ("HOLD" if intra["intraday_proba"] >= dyn_thresh - 0.10 else "SKIP")
+
+            scores["intraday_ml_proba"]   = intra["intraday_proba"]
+            scores["intraday_ml_signal"]  = intra_signal
+            scores["intraday_threshold"]  = dyn_thresh
+            scores["vix_live"]            = round(vix_val, 2)
+            logger.info(f"{symbol}: Intraday ML={intra_signal} proba={intra['intraday_proba']:.3f} "
+                        f"dyn_thresh={dyn_thresh} VIX={vix_val:.1f} FO_days={fo_days}")
+        except Exception as e:
+            logger.debug(f"Intraday ML skipped: {e}")
+            scores["intraday_ml_proba"]  = None
+            scores["intraday_ml_signal"] = None
+            scores["intraday_threshold"] = 0.55
 
         # 4. Emergency override: TIER 1 news + FinBERT confirms negative sentiment
         if scores["tier"] == 1 and scores["sentiment"] < -0.2:
