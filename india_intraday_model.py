@@ -36,22 +36,15 @@ DATA_DIR   = Path("stocks_1h")
 MODEL_PATH = Path("stocks_1h/india_intraday_model.pkl")
 FORWARD_HOURS  = 3
 LABEL_THRESHOLD = 1.0   # % forward return
+MIN_AUC_DELTA   = -0.02  # new model must not be worse than this vs incumbent
 
 NSE_OPEN  = 9   # 9:15 AM
 NSE_CLOSE = 15  # 3:30 PM
 
-NIFTY50_TICKERS = [
-    "RELIANCE.NS","TCS.NS","HDFCBANK.NS","INFY.NS","ICICIBANK.NS",
-    "HINDUNILVR.NS","SBIN.NS","BHARTIARTL.NS","ITC.NS","KOTAKBANK.NS",
-    "LT.NS","AXISBANK.NS","ASIANPAINT.NS","MARUTI.NS","TITAN.NS",
-    "SUNPHARMA.NS","ULTRACEMCO.NS","BAJFINANCE.NS","WIPRO.NS","HCLTECH.NS",
-    "NESTLEIND.NS","POWERGRID.NS","NTPC.NS","TECHM.NS","INDUSINDBK.NS",
-    "BAJAJFINSV.NS","ONGC.NS","COALINDIA.NS","ADANIENT.NS","ADANIPORTS.NS",
-    "DIVISLAB.NS","DRREDDY.NS","EICHERMOT.NS","GRASIM.NS","HEROMOTOCO.NS",
-    "HINDALCO.NS","JSWSTEEL.NS","M&M.NS","SBILIFE.NS","TATACONSUM.NS",
-    "TATASTEEL.NS","CIPLA.NS","APOLLOHOSP.NS","BAJAJ-AUTO.NS","BPCL.NS",
-    "BRITANNIA.NS","HDFCLIFE.NS","INDIGO.NS","ETERNAL.NS","TATAMOTORS.NS",
-]
+# Canonical NIFTY 50 list lives in core/symbols.py (B.1). Build the yfinance
+# ticker form here.
+from core.symbols import NIFTY_50, to_yfinance_ticker
+NIFTY50_TICKERS = [to_yfinance_ticker(s) for s in NIFTY_50]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -66,7 +59,15 @@ def _atr(h, l, c, n=14):
     return tr.ewm(alpha=1/n, min_periods=n).mean()
 
 def _fo_expiry_days(index: pd.DatetimeIndex) -> pd.Series:
-    """Days until next monthly F&O expiry (last Thursday of month)."""
+    """Days until next monthly F&O expiry (last Thursday of month, with
+    holiday adjustment).
+
+    B.10: when the last Thursday is an NSE holiday, expiry shifts to the
+    prior trading day. Without this fix, ~5–10 expiry weeks per year had
+    the wrong distance feature, which polluted the trained intraday model.
+    """
+    from core.holidays import is_trading_day, previous_trading_day
+
     def last_thursday(dt):
         # Last Thursday of the month
         last = dt.replace(day=28) + timedelta(days=4)
@@ -74,6 +75,12 @@ def _fo_expiry_days(index: pd.DatetimeIndex) -> pd.Series:
         last += timedelta(days=3)  # Thursday
         if last.month != dt.month:
             last -= timedelta(weeks=1)
+        # If that Thursday is a holiday, expiry moves to the previous
+        # trading day.
+        d = last.date()
+        if not is_trading_day(d):
+            d = previous_trading_day(d)
+            last = last.replace(year=d.year, month=d.month, day=d.day)
         return last
 
     result = []
@@ -204,6 +211,36 @@ def build_labels(df: pd.DataFrame) -> pd.Series:
     fwd = df["Close"].shift(-FORWARD_HOURS) / df["Close"] - 1
     return (fwd * 100 > LABEL_THRESHOLD).astype(int)
 
+# ── Promotion gate ────────────────────────────────────────────────────────────
+
+def _incumbent_auc(X_val: "pd.DataFrame", y_val: "pd.Series") -> float:
+    if not MODEL_PATH.exists():
+        return 0.0
+    try:
+        with open(MODEL_PATH, "rb") as f:
+            saved = pickle.load(f)
+        if "auc" in saved:
+            return float(saved["auc"])
+        from sklearn.metrics import roc_auc_score
+        X_aligned = X_val.reindex(columns=saved["features"], fill_value=0).fillna(0)
+        return float(roc_auc_score(y_val, saved["model"].predict_proba(X_aligned)[:, 1]))
+    except Exception:
+        return 0.0
+
+
+def _save_if_better(model, features: list, new_auc: float,
+                    X_val: "pd.DataFrame", y_val: "pd.Series") -> bool:
+    inc_auc = _incumbent_auc(X_val, y_val)
+    if new_auc < inc_auc + MIN_AUC_DELTA:
+        print(f"\n⚠️  Promotion REJECTED: new AUC {new_auc:.4f} < incumbent {inc_auc:.4f} + delta {MIN_AUC_DELTA}")
+        return False
+    MODEL_PATH.parent.mkdir(exist_ok=True)
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump({"model": model, "features": features, "auc": new_auc}, f)
+    print(f"\n✅ Model promoted: new AUC {new_auc:.4f} >= incumbent {inc_auc:.4f} + delta {MIN_AUC_DELTA}")
+    return True
+
+
 # ── Train ─────────────────────────────────────────────────────────────────────
 
 def train():
@@ -274,10 +311,8 @@ def train():
     for name, imp in importance.items():
         print(f"  {name:<25} {imp:.4f} {'█' * int(imp * 300)}")
 
-    MODEL_PATH.parent.mkdir(exist_ok=True)
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump({"model": model, "features": list(X.columns)}, f)
-    print(f"\nModel saved → {MODEL_PATH}")
+    mean_auc = float(np.mean(auc_scores))
+    _save_if_better(model, list(X.columns), mean_auc, X_val.fillna(0), y_val)
     print(f"\nClassification report (last fold):")
     print(classification_report(y_val, model.predict(X_val.fillna(0))))
 
@@ -337,9 +372,18 @@ def predict(symbol: str) -> dict:
     proba  = model.predict_proba(latest)[0][1]
     signal = "BUY" if proba >= 0.55 else ("HOLD" if proba >= 0.40 else "SKIP")
 
-    return {"symbol": symbol, "intraday_signal": signal,
-            "intraday_proba": round(float(proba), 4),
-            "intraday_confidence": round(float(proba) * 100, 1)}
+    # B.2: surface the result under both old and new key names so callers
+    # transitioning to the disambiguated `ml_1h_*` form keep working.
+    return {
+        "symbol": symbol,
+        "ml_1h_signal":     signal,
+        "ml_1h_proba":      round(float(proba), 4),
+        "ml_1h_confidence": round(float(proba) * 100, 1),
+        # Legacy aliases — remove after one release cycle.
+        "intraday_signal":     signal,
+        "intraday_proba":      round(float(proba), 4),
+        "intraday_confidence": round(float(proba) * 100, 1),
+    }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

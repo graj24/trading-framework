@@ -227,9 +227,17 @@ class TechnicalAgent(Agent):
                     intraday_signal == "bullish",
                     float(c5.iloc[-1]) > vwap5,
                 ])
+                # B.2: tech_5m_* keys disambiguate the 5-minute technical
+                # supplement from the 1-hour ML signal (`ml_1h_*`). Old
+                # intraday_* aliases retained for one release for back-compat.
+                data["tech_5m_rsi"]      = round(rsi5, 2)
+                data["tech_5m_macd"]     = intraday_signal
+                data["tech_5m_score"]    = intraday_score   # 0-3
+                data["tech_5m_vs_vwap"]  = round(float(c5.iloc[-1]) - vwap5, 2)
+                # Legacy aliases — to be removed after one release cycle.
                 data["intraday_rsi5"]    = round(rsi5, 2)
                 data["intraday_macd"]    = intraday_signal
-                data["intraday_score"]   = intraday_score   # 0-3
+                data["intraday_score"]   = intraday_score
                 data["intraday_vs_vwap"] = round(float(c5.iloc[-1]) - vwap5, 2)
                 # Boost technical_score if intraday confirms daily
                 if intraday_score >= 2 and macd_signal == "bullish":

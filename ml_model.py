@@ -31,6 +31,7 @@ warnings.filterwarnings("ignore")
 MODEL_PATH = Path("stocks/ml_signal_model.pkl")
 LABEL_THRESHOLD = 1.5   # % forward return to label as BUY
 FORWARD_DAYS    = 5     # predict 5-day forward return
+MIN_AUC_DELTA   = -0.02 # new model must not be worse than this vs incumbent
 
 SECTOR_INDICES = {
     "nifty":     "^NSEI",
@@ -152,7 +153,34 @@ def build_labels(df: pd.DataFrame) -> pd.Series:
 # ── Load market data ──────────────────────────────────────────────────────────
 
 def load_market_data(start: str, end: str) -> dict[str, pd.Series]:
-    market = {}
+    """Load NIFTY + sector + VIX series for the given date range.
+
+    C.1: results are cached at ``stocks/_market_data.parquet`` with the
+    fetched (start, end) range stored in metadata. The cache hits when the
+    range fully covers a request, so a 50-symbol predict cycle no longer
+    hammers yfinance with 350 requests.
+    """
+    cache_path = Path("stocks/_market_data.parquet")
+    cache_meta = Path("stocks/_market_data.meta")
+
+    # Try cache first.
+    if cache_path.exists() and cache_meta.exists():
+        try:
+            meta = cache_meta.read_text().strip().split("|")
+            cached_start, cached_end = meta[0], meta[1]
+            if cached_start <= start and cached_end >= end:
+                df = pd.read_parquet(cache_path)
+                # Slice by date range.
+                df.index = pd.to_datetime(df.index)
+                mask = (df.index >= start) & (df.index <= end)
+                df = df[mask]
+                if not df.empty:
+                    return {col: df[col].dropna() for col in df.columns}
+        except Exception:
+            pass  # cache corrupted — refetch
+
+    # Cache miss. Fetch fresh.
+    market: dict[str, pd.Series] = {}
     for name, ticker in SECTOR_INDICES.items():
         try:
             df = yf.Ticker(ticker).history(start=start, end=end, interval="1d")
@@ -162,7 +190,59 @@ def load_market_data(start: str, end: str) -> dict[str, pd.Series]:
                 market[name] = s
         except Exception:
             pass
+
+    # Persist to cache.
+    if market:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            combined = pd.DataFrame(market)
+            combined.to_parquet(cache_path)
+            cache_meta.write_text(f"{start}|{end}")
+        except Exception:
+            pass  # writing the cache is best-effort
+
     return market
+
+
+# ── Promotion gate ────────────────────────────────────────────────────────────
+
+def _incumbent_auc(X_val: "pd.DataFrame", y_val: "pd.Series") -> float:
+    """Return the AUC of the currently-saved model on the validation set,
+    or 0.0 if no model exists yet."""
+    if not MODEL_PATH.exists():
+        return 0.0
+    try:
+        with open(MODEL_PATH, "rb") as f:
+            saved = pickle.load(f)
+        # Prefer the stored AUC (recorded at training time on the full CV set).
+        if "auc" in saved:
+            return float(saved["auc"])
+        # Fallback: re-evaluate on the provided validation slice (old models).
+        from sklearn.metrics import roc_auc_score
+        inc_model = saved["model"]
+        inc_feats = saved["features"]
+        X_aligned = X_val.reindex(columns=inc_feats, fill_value=0).fillna(0)
+        proba = inc_model.predict_proba(X_aligned)[:, 1]
+        return float(roc_auc_score(y_val, proba))
+    except Exception:
+        return 0.0
+
+
+def _save_if_better(model, features: list, new_auc: float,
+                    X_val: "pd.DataFrame", y_val: "pd.Series") -> bool:
+    """Save model only when new_auc >= incumbent_auc + MIN_AUC_DELTA.
+
+    Returns True if the model was promoted, False if it was rejected.
+    """
+    inc_auc = _incumbent_auc(X_val, y_val)
+    if new_auc < inc_auc + MIN_AUC_DELTA:
+        print(f"\n⚠️  Promotion REJECTED: new AUC {new_auc:.4f} < incumbent {inc_auc:.4f} + delta {MIN_AUC_DELTA}")
+        return False
+    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump({"model": model, "features": features, "auc": new_auc}, f)
+    print(f"\n✅ Model promoted: new AUC {new_auc:.4f} >= incumbent {inc_auc:.4f} + delta {MIN_AUC_DELTA}")
+    return True
 
 
 # ── Train ─────────────────────────────────────────────────────────────────────
@@ -250,10 +330,10 @@ def train():
         bar = "█" * int(imp * 300)
         print(f"  {feat_name:<25} {imp:.4f} {bar}")
 
-    MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump({"model": model, "features": list(X.columns)}, f)
-    print(f"\nModel saved to {MODEL_PATH}")
+    # Promotion gate: only overwrite model.pkl if new AUC is not worse.
+    mean_auc = float(np.mean(auc_scores))
+    # Use the last validation fold for the incumbent comparison.
+    _save_if_better(model, list(X.columns), mean_auc, X_val.fillna(0), y_val)
 
     print(f"\nClassification report (last fold):")
     print(classification_report(y_val, model.predict(X_val.fillna(0))))

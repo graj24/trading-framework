@@ -20,6 +20,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from core.logger import setup_logging
+from core.costs import BROKERAGE_FRAC as BROKERAGE
 
 load_dotenv()
 with open("config.yaml") as f:
@@ -284,7 +285,7 @@ if trade_open:
 # ── Final P&L ─────────────────────────────────────────────────────────────────
 header("SIMULATION RESULT")
 
-brokerage = entry_price * qty * 0.0003 + exit_price * qty * 0.0003
+brokerage = (entry_price + exit_price) * qty * BROKERAGE
 net_pnl   = final_pnl - brokerage
 net_pct   = (exit_price - entry_price) / entry_price * 100
 
