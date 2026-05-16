@@ -361,14 +361,31 @@ class MasterAgent(Agent):
         target = llm_out.get("target", 0.0)
 
         if decision == "BUY":
+            # Get real period PNL and open positions for risk checks
+            from agents.execution_agent import get_period_pnl_pct
+            import sqlite3 as _sqlite3
+            from pathlib import Path as _Path
+            weekly_pnl  = get_period_pnl_pct(7)
+            monthly_pnl = get_period_pnl_pct(30)
+            open_positions = []
+            _db = _Path("paper_trades.db")
+            if _db.exists():
+                with _sqlite3.connect(_db) as _conn:
+                    open_positions = [
+                        r[0] for r in _conn.execute(
+                            "SELECT symbol FROM trades WHERE outcome='open'"
+                        ).fetchall()
+                    ]
             risk_result = self.risk_manager.run({
                 "symbol": symbol,
                 "entry_price": price,
                 "win_rate": scores["win_rate"],
                 "avg_win": pattern.get("avg_win", 2.0),
                 "avg_loss": abs(pattern.get("avg_loss", -1.5)),
-                "open_positions": [],
+                "open_positions": open_positions,
                 "daily_pnl_pct": 0.0,
+                "weekly_pnl_pct": weekly_pnl,
+                "monthly_pnl_pct": monthly_pnl,
             })
             if risk_result.ok():
                 position_size = risk_result.data.get("position_size", 0.0)

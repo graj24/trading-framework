@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List
 
 from .twitter_collector import StockDataCollector as TwitterCollector
@@ -66,14 +67,12 @@ class StockSentimentPipeline:
         """Export results to JSON file."""
         if filename is None:
             filename = f"sentiment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
-        filepath = f"/Users/anantamanoranjan/Desktop/ripple/output/{filename}"
-        
-        # Create output directory if needed
-        import os
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
+
+        output_dir = Path(__file__).resolve().parent.parent / "output"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filepath = output_dir / filename
+
         with open(filepath, 'w') as f:
             json.dump(results, f, indent=2)
-        
-        return filepath
+
+        return str(filepath)

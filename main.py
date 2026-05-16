@@ -81,6 +81,7 @@ def main():
                 target=d["target"],
                 position_size=d["position_size"],
                 reasoning=d["reasoning"],
+                signals=d.get("agent_scores"),
             )
             executed.append(trade)
             logger.info(f"  → Paper trade opened: {trade['trade_id']} | entry ₹{trade['entry_price']} | SL ₹{trade['stop_loss']} | T ₹{trade['target']}")
@@ -129,13 +130,18 @@ def main():
             wins = [t for t in closed_trades if t["pnl_inr"] and t["pnl_inr"] > 0]
             print(f"  Win rate          : {len(wins)}/{len(closed_trades)} ({len(wins)/len(closed_trades)*100:.0f}%)")
             print(f"  Total realised P&L: ₹{total_realised:+,.2f}")
-            # Update signal weights from closed trades
+            # Update signal weights from closed trades — read signals from stored JSON
+            import json as _json
             for t in closed_trades:
                 outcome = "win" if t["pnl_inr"] and t["pnl_inr"] > 0 else "loss"
+                try:
+                    signals = _json.loads(t["signals_json"]) if t["signals_json"] else {}
+                except Exception:
+                    signals = {}
                 learner.update_weights(t["symbol"], outcome, {
-                    "technical_score": t.get("technical_score", 0),
-                    "news_sentiment":  t.get("sentiment", 0),
-                    "pattern_ev":      t.get("pattern_ev", 0),
+                    "technical_score": signals.get("technical_score", 0),
+                    "news_sentiment":  signals.get("sentiment", 0),
+                    "pattern_ev":      signals.get("pattern_ev", 0),
                 })
                 logger.info(f"  → LearningAgent updated weights for {t['symbol']} ({outcome})")
         conn.close()

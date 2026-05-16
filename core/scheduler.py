@@ -126,24 +126,11 @@ def job_pre_market_analysis():
         logger.error(f"Pre-market analysis failed: {e}")
 
 
-def job_generate_signals():
-    logger.info("🎯 [09:00] Generating signals...")
-    try:
-        from agents.master import MasterAgent
-        config = _load_config()
-        master = MasterAgent(config)
-        for symbol in config["watchlist"]:
-            result = master.run_for_stock(symbol)
-            if result.ok():
-                d = result.data
-                logger.info(f"  {symbol}: {d['decision']} (conf={d['confidence']}%) — {d['reasoning']}")
-    except Exception as e:
-        logger.error(f"Signal generation failed: {e}")
-
-
 def job_execute_trades():
     logger.info("⚡ [09:15] Executing paper trades...")
     try:
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
         from agents.master import MasterAgent
         from agents.execution_agent import ExecutionAgent
         from core.alerts import TelegramAlerter
@@ -152,21 +139,43 @@ def job_execute_trades():
         executor = ExecutionAgent(config)
         alerter = TelegramAlerter()
 
+        # Fetch symbols that already have an open position — skip re-entry
+        open_symbols: set[str] = set()
+        _db = _Path("paper_trades.db")
+        if _db.exists():
+            with _sqlite3.connect(_db) as _conn:
+                open_symbols = {r[0] for r in _conn.execute(
+                    "SELECT symbol FROM trades WHERE outcome='open'"
+                ).fetchall()}
+
         for symbol in config["watchlist"]:
             result = master.run_for_stock(symbol)
-            if result.ok() and result.data["decision"] == "BUY":
-                d = result.data
-                trade = executor.execute_trade(
-                    symbol=symbol,
-                    entry_price=d["entry_price"],
-                    stop_loss=d["stop_loss"],
-                    target=d["target"],
-                    position_size=d["position_size"],
-                    reasoning=d["reasoning"],
-                )
-                alerter.trade_alert(symbol, "BUY", d["entry_price"],
-                                    d["stop_loss"], d["target"], d["confidence"])
-                logger.info(f"  Trade executed: {trade}")
+            if not result.ok():
+                continue
+            d = result.data
+            logger.info(f"  {symbol}: {d['decision']} (conf={d['confidence']}%) — {d['reasoning']}")
+
+            if d["decision"] != "BUY":
+                continue
+            if symbol in open_symbols:
+                logger.info(f"  → {symbol}: position already open, skipping")
+                continue
+            if not d.get("entry_price") or not d.get("position_size"):
+                continue
+
+            trade = executor.execute_trade(
+                symbol=symbol,
+                entry_price=d["entry_price"],
+                stop_loss=d["stop_loss"],
+                target=d["target"],
+                position_size=d["position_size"],
+                reasoning=d["reasoning"],
+                signals=d.get("agent_scores"),
+            )
+            open_symbols.add(symbol)  # prevent double-entry within the same run
+            alerter.trade_alert(symbol, "BUY", d["entry_price"],
+                                d["stop_loss"], d["target"], d["confidence"])
+            logger.info(f"  Trade executed: {trade}")
     except Exception as e:
         logger.error(f"Trade execution failed: {e}")
 
@@ -212,6 +221,8 @@ def job_intraday_scan():
 def job_monitor_positions():
     logger.info("👁️  Monitoring positions...")
     try:
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
         from agents.execution_agent import ExecutionAgent
         from agents.news_agent import NewsAgent
         from core.alerts import TelegramAlerter
@@ -226,13 +237,22 @@ def job_monitor_positions():
             alerter.exit_alert(trade["symbol"], trade["outcome"],
                                trade["pnl_pct"], trade["pnl_inr"])
 
-        # Check news for open positions
-        alerts = news_agent.monitor_open_positions(config["watchlist"])
-        for symbol, tier in alerts.items():
-            if tier == 1:
-                result = executor.emergency_exit(symbol, "TIER 1 news")
-                if result:
-                    alerter.emergency_alert(symbol, tier, "Emergency exit triggered")
+        # Only check news for currently open positions, not entire watchlist
+        open_symbols: list[str] = []
+        _db = _Path("paper_trades.db")
+        if _db.exists():
+            with _sqlite3.connect(_db) as _conn:
+                open_symbols = [r[0] for r in _conn.execute(
+                    "SELECT DISTINCT symbol FROM trades WHERE outcome='open'"
+                ).fetchall()]
+
+        if open_symbols:
+            alerts = news_agent.monitor_open_positions(open_symbols)
+            for symbol, tier in alerts.items():
+                if tier == 1:
+                    result = executor.emergency_exit(symbol, "TIER 1 news")
+                    if result:
+                        alerter.emergency_alert(symbol, tier, "Emergency exit triggered")
     except Exception as e:
         logger.error(f"Position monitoring failed: {e}")
 
@@ -307,6 +327,10 @@ def job_prune_watchlist():
 def job_post_market():
     logger.info("📋 [15:30] Post-market report...")
     try:
+        import json as _json
+        import sqlite3 as _sqlite3
+        from datetime import date as _date
+        from pathlib import Path as _Path
         from agents.execution_agent import ExecutionAgent
         from agents.learning_agent import LearningAgent
         from core.alerts import TelegramAlerter
@@ -318,6 +342,29 @@ def job_post_market():
         report = executor.daily_report()
         alerter.daily_summary(report)
         logger.info(f"Daily P&L: ₹{report['total_pnl_inr']:+.2f} ({report['total_pnl_pct']:+.2f}%)")
+
+        # Update signal weights from today's closed trades
+        _db = _Path("paper_trades.db")
+        if _db.exists():
+            today = _date.today().isoformat()
+            with _sqlite3.connect(_db) as _conn:
+                _conn.row_factory = _sqlite3.Row
+                closed_today = _conn.execute(
+                    "SELECT * FROM trades WHERE exit_date LIKE ? AND outcome != 'open'",
+                    (f"{today}%",),
+                ).fetchall()
+            for t in closed_today:
+                outcome = "win" if t["pnl_inr"] and t["pnl_inr"] > 0 else "loss"
+                try:
+                    signals = _json.loads(t["signals_json"]) if t["signals_json"] else {}
+                except Exception:
+                    signals = {}
+                learner.update_weights(t["symbol"], outcome, {
+                    "technical_score": signals.get("technical_score", 0),
+                    "news_sentiment":  signals.get("sentiment", 0),
+                    "pattern_ev":      signals.get("pattern_ev", 0),
+                })
+                logger.info(f"  LearningAgent updated weights: {t['symbol']} ({outcome})")
 
         for symbol in config["watchlist"]:
             analysis = learner.weekly_analysis(symbol)
@@ -340,7 +387,6 @@ def start():
     scheduler.add_job(job_discover_stocks, CronTrigger(hour=7, minute=0))
     scheduler.add_job(job_preopen_scan, CronTrigger(hour=9, minute=0))
     scheduler.add_job(job_pre_market_analysis, CronTrigger(hour=8, minute=30))
-    scheduler.add_job(job_generate_signals, CronTrigger(hour=9, minute=0))
     scheduler.add_job(job_execute_trades, CronTrigger(hour=9, minute=15))
     scheduler.add_job(job_monitor_positions, IntervalTrigger(minutes=5),
                       id="monitor", start_date="2000-01-01 09:15:00")
@@ -368,7 +414,6 @@ def run_once():
     job_discover_stocks()
     job_preopen_scan()
     job_pre_market_analysis()
-    job_generate_signals()
     job_execute_trades()
     job_monitor_positions()
     job_post_market()

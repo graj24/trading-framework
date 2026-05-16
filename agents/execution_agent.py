@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -26,24 +26,48 @@ def _get_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("""
         CREATE TABLE IF NOT EXISTS trades (
-            id          TEXT PRIMARY KEY,
-            symbol      TEXT NOT NULL,
-            entry_date  TEXT,
-            entry_price REAL,
-            stop_loss   REAL,
-            target      REAL,
+            id            TEXT PRIMARY KEY,
+            symbol        TEXT NOT NULL,
+            entry_date    TEXT,
+            entry_price   REAL,
+            stop_loss     REAL,
+            target        REAL,
             position_size REAL,
-            exit_date   TEXT,
-            exit_price  REAL,
-            pnl_pct     REAL,
-            pnl_inr     REAL,
-            outcome     TEXT DEFAULT 'open',
-            reasoning   TEXT,
-            created_at  TEXT
+            exit_date     TEXT,
+            exit_price    REAL,
+            pnl_pct       REAL,
+            pnl_inr       REAL,
+            outcome       TEXT DEFAULT 'open',
+            reasoning     TEXT,
+            signals_json  TEXT,
+            created_at    TEXT
         )
     """)
+    # Migrate: add signals_json if it doesn't exist yet
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+    if "signals_json" not in cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN signals_json TEXT")
     conn.commit()
     return conn
+
+
+def get_period_pnl_pct(days: int) -> float:
+    """Return total PNL % for closed trades in the last `days` calendar days."""
+    if not DB_PATH.exists():
+        return 0.0
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT pnl_pct, position_size FROM trades WHERE outcome != 'open' AND exit_date >= ?",
+            (cutoff,),
+        ).fetchall()
+    if not rows:
+        return 0.0
+    # Weighted average PNL % by position size
+    total_size = sum(r[1] for r in rows if r[1])
+    if total_size == 0:
+        return sum(r[0] for r in rows if r[0]) / len(rows)
+    return round(sum(r[0] * r[1] for r in rows if r[0] and r[1]) / total_size, 4)
 
 
 def _get_ltp(symbol: str) -> float:
@@ -83,22 +107,25 @@ class ExecutionAgent(Agent):
         return self._result({"status": "no_trade", "decision": decision.get("decision", "HOLD")})
 
     def execute_trade(self, symbol: str, entry_price: float, stop_loss: float,
-                      target: float, position_size: float, reasoning: str = "") -> dict:
+                      target: float, position_size: float, reasoning: str = "",
+                      signals: dict | None = None) -> dict:
         """Open a new paper trade."""
         if self.mode != "paper":
             raise RuntimeError("Live trading not yet enabled. Set mode=paper in config.")
 
+        import json as _json
         trade_id = str(uuid.uuid4())[:8]
         entry_price_with_slip = round(entry_price * (1 + SLIPPAGE), 2)
         now = datetime.now().isoformat()
+        signals_json = _json.dumps(signals) if signals else None
 
         with _get_conn() as conn:
             conn.execute("""
                 INSERT INTO trades (id, symbol, entry_date, entry_price, stop_loss, target,
-                                    position_size, outcome, reasoning, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                                    position_size, outcome, reasoning, signals_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
             """, (trade_id, symbol, now, entry_price_with_slip, stop_loss, target,
-                  position_size, reasoning, now))
+                  position_size, reasoning, signals_json, now))
 
         logger.info(f"Paper trade opened: {trade_id} | {symbol} @ ₹{entry_price_with_slip} | SL ₹{stop_loss} | T ₹{target}")
         return {"trade_id": trade_id, "symbol": symbol, "entry_price": entry_price_with_slip,

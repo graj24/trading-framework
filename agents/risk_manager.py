@@ -8,7 +8,7 @@ from typing import Optional
 import pandas as pd
 import yaml
 
-from agents.base import Agent, AgentResult
+from agents.base import Agent, AgentResult, AgentStatus
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
@@ -130,7 +130,7 @@ class RiskManager(Agent):
         super().__init__("risk_manager", config or _load_config())
 
     def run(self, context: Optional[dict] = None) -> AgentResult:
-        self._status = self.__class__.__mro__[1].__init__  # just to set running
+        self._status = AgentStatus.RUNNING
         ctx = context or {}
         symbol = ctx.get("symbol", "RELIANCE")
         entry_price = ctx.get("entry_price", 0.0)
