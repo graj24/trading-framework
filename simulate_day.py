@@ -32,6 +32,7 @@ logging.getLogger("yfinance").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 SYMBOL = sys.argv[1].upper() if len(sys.argv) > 1 else "TATACONSUM"
+TARGET_DATE = sys.argv[2] if len(sys.argv) > 2 else None  # e.g. "2024-01-12"
 SEP  = "=" * 65
 SEP2 = "-" * 65
 
@@ -49,17 +50,22 @@ df = pd.read_parquet(path).sort_index()
 df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
 df = df.dropna(subset=["Close", "Open", "High", "Low"])
 
-# ── Find the biggest single-day move ─────────────────────────────────────────
+# ── Find the move day ────────────────────────────────────────────────────────
 df["day_return"] = df["Close"].pct_change() * 100
-# Find the most recent big move (>= 5%)
-big_moves = df[df["day_return"] >= 5.0].tail(10)
 
-if big_moves.empty:
-    # Use the biggest move in last 60 days
-    big_moves = df.tail(60).nlargest(1, "day_return")
-
-# Use the most recent big move
-move_day = big_moves.index[-1]
+if TARGET_DATE:
+    target_dt = pd.Timestamp(TARGET_DATE)
+    idx = df.index.searchsorted(target_dt)
+    if idx >= len(df):
+        print(f"Date {TARGET_DATE} is beyond available data.")
+        sys.exit(1)
+    move_day = df.index[idx]
+else:
+    # Find the biggest single-day move (>= 15%) in full history
+    big_moves = df[df["day_return"] >= 15.0]
+    if big_moves.empty:
+        big_moves = df.nlargest(1, "day_return")
+    move_day = big_moves["day_return"].idxmax()
 move_day_idx = df.index.get_loc(move_day)
 prev_day_idx = move_day_idx - 1
 prev_day = df.index[prev_day_idx]

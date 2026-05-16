@@ -190,6 +190,9 @@ class TechnicalAgent(Agent):
             high.iloc[-1] >= high_20.iloc[-2] and volume.iloc[-1] > vol_avg_20.iloc[-1]
         )
 
+        vol_avg20 = volume.rolling(20).mean().iloc[-1]
+        volume_ratio = round(float(volume.iloc[-1] / vol_avg20), 2) if vol_avg20 > 0 else 1.0
+
         data = {
             "symbol": symbol,
             "technical_score": score,
@@ -205,7 +208,35 @@ class TechnicalAgent(Agent):
             "adx": round(float(adx), 2),
             "atr": round(float(atr), 2),
             "price": round(float(price), 2),
+            "volume_ratio": volume_ratio,
+            "current_price": round(float(price), 2),
         }
+
+        # Supplementary intraday (5m) scoring
+        try:
+            import yfinance as yf
+            df5 = yf.Ticker(symbol + ".NS").history(period="2d", interval="5m")
+            if not df5.empty and len(df5) >= 20:
+                c5 = df5["Close"]
+                rsi5 = float(_rsi(c5).iloc[-1])
+                macd5, sig5 = _macd(c5)
+                intraday_signal = "bullish" if float(macd5.iloc[-1]) > float(sig5.iloc[-1]) else "bearish"
+                vwap5 = _vwap(df5["High"].tail(20), df5["Low"].tail(20), c5.tail(20), df5["Volume"].tail(20))
+                intraday_score = sum([
+                    rsi5 > 50,
+                    intraday_signal == "bullish",
+                    float(c5.iloc[-1]) > vwap5,
+                ])
+                data["intraday_rsi5"]    = round(rsi5, 2)
+                data["intraday_macd"]    = intraday_signal
+                data["intraday_score"]   = intraday_score   # 0-3
+                data["intraday_vs_vwap"] = round(float(c5.iloc[-1]) - vwap5, 2)
+                # Boost technical_score if intraday confirms daily
+                if intraday_score >= 2 and macd_signal == "bullish":
+                    data["technical_score"] = min(10, score + 1)
+        except Exception:
+            pass
+
         return self._result(data)
 
 

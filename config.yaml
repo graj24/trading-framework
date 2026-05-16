@@ -6,9 +6,8 @@ data:
   - 15m
   - 5m
 llm:
-  litellm_base_url: http://localhost:4000
+  model: groq/llama-3.3-70b-versatile
   max_tokens: 2000
-  model: deepseek
   temperature: 0.1
 logging:
   backup_count: 5
@@ -39,14 +38,54 @@ trading:
   currency: INR
   mode: paper
 watchlist:
-- HDFCBANK
-- INFY
-- TITAN
 - RELIANCE
 - TCS
-- TATACONSUM
-- INDIGO
+- HDFCBANK
+- INFY
+- ICICIBANK
+- HINDUNILVR
 - SBIN
+- BHARTIARTL
+- ITC
+- KOTAKBANK
+- LT
+- AXISBANK
+- ASIANPAINT
+- MARUTI
+- TITAN
+- SUNPHARMA
+- ULTRACEMCO
+- BAJFINANCE
+- WIPRO
+- HCLTECH
+- NESTLEIND
+- POWERGRID
+- NTPC
+- TECHM
+- INDUSINDBK
+- BAJAJFINSV
+- ONGC
+- COALINDIA
+- ADANIENT
+- ADANIPORTS
+- DIVISLAB
+- DRREDDY
+- EICHERMOT
+- GRASIM
+- HEROMOTOCO
+- HINDALCO
+- JSWSTEEL
+- M&M
+- SBILIFE
+- TATACONSUM
+- TATASTEEL
+- CIPLA
+- APOLLOHOSP
+- BAJAJ_AUTO
+- BPCL
+- BRITANNIA
+- HDFCLIFE
+- INDIGO
 - ETERNAL
 
 core_watchlist:

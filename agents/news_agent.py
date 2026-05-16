@@ -14,11 +14,34 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-import requests
-from bs4 import BeautifulSoup
+import yfinance as yf
 
 from agents.base import Agent, AgentResult
 from core.knowledge_base import read_kb, write_kb
+from ripple.sentiment_analyzer import SentimentAnalyzer
+
+_finbert = None
+
+def _get_finbert() -> SentimentAnalyzer:
+    global _finbert
+    if _finbert is None:
+        _finbert = SentimentAnalyzer()
+    return _finbert
+
+
+def _score_sentiment_finbert(texts: list[str]) -> float:
+    """Use FinBERT to score a list of headlines. Returns -1.0 to +1.0."""
+    if not texts:
+        return 0.0
+    try:
+        analyzer = _get_finbert()
+        results = analyzer.analyze_batch(texts)
+        # Convert FinBERT % scores to -1..+1: (Positive - Negative) / 100
+        scores = [(r.get("Positive", 0) - r.get("Negative", 0)) / 100 for r in results]
+        return round(sum(scores) / len(scores), 3)
+    except Exception as e:
+        logger.warning(f"FinBERT scoring failed, falling back to keyword: {e}")
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -62,70 +85,39 @@ def _classify_tier(text: str) -> Optional[int]:
     return 3
 
 
-def _scrape_moneycontrol(symbol: str) -> list[dict]:
-    """Scrape MoneyControl news for a symbol."""
+def _fetch_yahoo_news(symbol: str, limit: int = 15) -> list[dict]:
+    """Fetch news via Yahoo Finance for NSE-listed stocks."""
     items = []
     try:
-        url = f"https://www.moneycontrol.com/stocks/company_info/stock_news.php?sc_id={symbol}&scat=&pageno=1&next=0&type=4&search_str="
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup.select("li.clearfix")[:10]:
-            a = tag.find("a")
-            if a and a.get_text(strip=True):
+        ticker = yf.Ticker(symbol + ".NS")
+        for article in (ticker.news or [])[:limit]:
+            title = article.get("content", {}).get("title", "")
+            pub_date = article.get("content", {}).get("pubDate", "")
+            if title:
                 items.append({
-                    "source": "moneycontrol",
-                    "headline": a.get_text(strip=True),
-                    "url": a.get("href", ""),
-                    "fetched_at": datetime.now().isoformat(),
+                    "source": "yahoo_finance",
+                    "headline": title,
+                    "url": article.get("content", {}).get("canonicalUrl", {}).get("url", ""),
+                    "fetched_at": pub_date or datetime.now().isoformat(),
                 })
     except Exception as e:
-        logger.debug(f"MoneyControl scrape failed: {e}")
+        logger.debug(f"Yahoo Finance news fetch failed for {symbol}: {e}")
     return items
+
+
+def _scrape_moneycontrol(symbol: str) -> list[dict]:
+    """Scrape MoneyControl news for a symbol."""
+    return []
 
 
 def _scrape_economic_times(symbol: str) -> list[dict]:
     """Scrape Economic Times for symbol news."""
-    items = []
-    try:
-        url = f"https://economictimes.indiatimes.com/topic/{symbol.lower()}"
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        for tag in soup.select("div.eachStory h3")[:10]:
-            a = tag.find("a")
-            if a and a.get_text(strip=True):
-                items.append({
-                    "source": "economic_times",
-                    "headline": a.get_text(strip=True),
-                    "url": "https://economictimes.indiatimes.com" + a.get("href", ""),
-                    "fetched_at": datetime.now().isoformat(),
-                })
-    except Exception as e:
-        logger.debug(f"Economic Times scrape failed: {e}")
-    return items
+    return []
 
 
 def _scrape_nse_announcements(symbol: str) -> list[dict]:
     """Fetch NSE corporate announcements via API."""
-    items = []
-    try:
-        url = f"https://www.nseindia.com/api/corp-announcements?index=equities&symbol={symbol}"
-        session = requests.Session()
-        # Prime cookies
-        session.get("https://www.nseindia.com", headers=HEADERS, timeout=TIMEOUT)
-        resp = session.get(url, headers=HEADERS, timeout=TIMEOUT)
-        data = resp.json()
-        for item in (data if isinstance(data, list) else [])[:10]:
-            headline = item.get("subject", item.get("desc", ""))
-            if headline:
-                items.append({
-                    "source": "nse",
-                    "headline": headline,
-                    "url": "",
-                    "fetched_at": datetime.now().isoformat(),
-                })
-    except Exception as e:
-        logger.debug(f"NSE announcements failed: {e}")
-    return items
+    return []
 
 
 class NewsAgent(Agent):
@@ -142,25 +134,26 @@ class NewsAgent(Agent):
 
     def analyze(self, symbol: str) -> dict:
         """Fetch, score, and store news for a symbol."""
-        all_news = []
-        all_news.extend(_scrape_moneycontrol(symbol))
-        all_news.extend(_scrape_economic_times(symbol))
-        all_news.extend(_scrape_nse_announcements(symbol))
+        all_news = _fetch_yahoo_news(symbol)
 
-        # Filter: only news mentioning the symbol
-        relevant = [
-            n for n in all_news
-            if symbol.lower() in n["headline"].lower() or n["source"] == "nse"
-        ]
+        # All Yahoo results are already symbol-specific — no filtering needed
+        relevant = all_news
 
-        # Score each item
+        # Score each item — tier via keywords, sentiment via FinBERT
+        headlines = [n["headline"] for n in relevant]
+        finbert_score = _score_sentiment_finbert(headlines)
+
         for item in relevant:
-            item["sentiment"] = _score_sentiment(item["headline"])
             item["tier"] = _classify_tier(item["headline"])
+            # Per-item keyword sentiment kept for KB storage
+            item["sentiment"] = _score_sentiment(item["headline"])
 
-        # Aggregate sentiment
-        sentiments = [n["sentiment"] for n in relevant]
-        avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
+        # Use FinBERT aggregate if available, else keyword fallback
+        if finbert_score is not None:
+            avg_sentiment = finbert_score
+        else:
+            sentiments = [n["sentiment"] for n in relevant]
+            avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
 
         # Worst tier (lowest number = most urgent)
         tiers = [n["tier"] for n in relevant if n.get("tier")]

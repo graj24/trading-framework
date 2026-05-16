@@ -50,23 +50,34 @@ def _llm_decision(symbol: str, price: float, scores: dict, rag: dict, config: di
         import litellm
         llm_cfg = config.get("llm", {})
 
+        # Pull recent headlines and extra fundamentals from KB
+        from core.knowledge_base import read_kb
+        news_kb   = read_kb(symbol, "news_history.json")
+        recent_headlines = [n["headline"] for n in news_kb.get("news", [])[-5:]]
+        fund      = read_kb(symbol, "fundamentals.json")
+        corr_kb   = read_kb(symbol, "sector_correlation.json")
+        top_corr  = sorted(corr_kb.get("correlations", {}).items(), key=lambda x: abs(x[1]), reverse=True)[:2]
+
         prompt = f"""You are an expert Indian stock trader. Make a trading decision based on the data below.
 Return ONLY valid JSON with no markdown: {{"decision": "BUY|SELL|HOLD", "confidence": 0-100, "entry": {price}, "stop_loss": 0.0, "target": 0.0, "reasoning": "one sentence"}}
 
-STOCK: {symbol}
-CURRENT PRICE: {price}
-TECHNICAL SCORE: {scores.get('technical_score', 0)}/10 (RSI: {scores.get('rsi', 0):.1f}, MACD: {scores.get('macd_signal', 'N/A')})
+STOCK: {symbol} | {fund.get('company_name','')} | {fund.get('sector','')} / {fund.get('industry','')}
+CURRENT PRICE: ₹{price} | 52W High: ₹{fund.get('52w_high','N/A')} | 52W Low: ₹{fund.get('52w_low','N/A')}
+VALUATION: PE={fund.get('pe_ratio','N/A')} | Fwd PE={fund.get('forward_pe','N/A')} | P/B={fund.get('price_to_book','N/A')} | ROE={fund.get('roe','N/A')}
+GROWTH: Revenue={fund.get('revenue_growth','N/A')} | Earnings={fund.get('earnings_growth','N/A')} | EPS=₹{fund.get('eps','N/A')}
+TECHNICAL SCORE: {scores.get('technical_score', 0)}/10 | RSI: {scores.get('rsi', 0):.1f} | MACD: {scores.get('macd_signal', 'N/A')} | Trend: {scores.get('trend','N/A')} | Volume: {scores.get('volume_ratio',1):.1f}×avg
+INTRADAY (5m): RSI={scores.get('intraday_rsi5','N/A')} | MACD={scores.get('intraday_macd','N/A')} | Score={scores.get('intraday_score','N/A')}/3 | vs VWAP=₹{scores.get('intraday_vs_vwap','N/A')}
 NEWS SENTIMENT: {scores.get('sentiment', 0):.2f} (Tier: {scores.get('tier', 'None')})
+RECENT HEADLINES: {' | '.join(recent_headlines) if recent_headlines else 'None'}
 PATTERN EV: {scores.get('pattern_ev', 0):.2f}% (Win rate: {scores.get('win_rate', 0):.0f}%)
+ML MODEL: signal={scores.get('ml_signal','N/A')} probability={scores.get('ml_proba','N/A')}
+INDIA INTRADAY ML (1h): signal={scores.get('intraday_ml_signal','N/A')} probability={scores.get('intraday_ml_proba','N/A')} (dynamic threshold={scores.get('intraday_threshold',0.55)}, VIX={scores.get('vix_live','N/A')})
 MARKET REGIME: {scores.get('regime', 'unknown')}
-SECTOR: {rag.get('sector', 'Unknown')}
-PE RATIO: {rag.get('pe_ratio', 'N/A')}
-EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%
-SIGNAL WEIGHTS: {json.dumps(rag.get('signal_weights', {}), default=str)[:200]}"""
+CORRELATIONS: {dict(top_corr)}
+EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
 
         response = litellm.completion(
-            model="openai/deepseek",
-            api_base=llm_cfg.get("litellm_base_url", "http://localhost:4000"),
+            model=llm_cfg.get("model", "groq/llama-3.3-70b-versatile"),
             messages=[{"role": "user", "content": prompt}],
             temperature=llm_cfg.get("temperature", 0.1),
             max_tokens=200,
@@ -85,29 +96,111 @@ SIGNAL WEIGHTS: {json.dumps(rag.get('signal_weights', {}), default=str)[:200]}""
 
 def _rule_based_decision(price: float, scores: dict) -> dict:
     """Fallback rule-based decision when LLM is unavailable."""
-    tech = scores.get("technical_score", 0)
-    sentiment = scores.get("sentiment", 0)
-    pattern_ev = scores.get("pattern_ev", 0)
+    tech = scores.get("technical_score", 0)          # 0-10
+    sentiment = scores.get("sentiment", 0)            # -1 to +1
+    pattern_ev = scores.get("pattern_ev", 0)          # % expected value
+    win_rate = scores.get("win_rate", 50)             # 0-100
     regime = scores.get("regime", "unknown")
     tier = scores.get("tier")
 
-    if tier == 1:
+    # FIX 2: Softer TIER 1 — only emergency-skip if FinBERT also confirms negative sentiment
+    if tier == 1 and sentiment < -0.2:
         return {"decision": "SKIP", "confidence": 95, "entry": price,
-                "stop_loss": 0.0, "target": 0.0, "reasoning": "TIER 1 news emergency"}
+                "stop_loss": 0.0, "target": 0.0, "reasoning": "TIER 1 news + negative sentiment confirmed"}
 
-    if tech >= 7 and sentiment >= 0 and pattern_ev > 0 and regime != "trending_bear":
+    # Hard skip: truly bearish regime with negative sentiment
+    if regime == "trending_bear" and sentiment < -0.3:
+        return {"decision": "SKIP", "confidence": 80, "entry": price,
+                "stop_loss": 0.0, "target": 0.0, "reasoning": "Trending bear regime + negative sentiment"}
+
+    # FIX 3: Regime-relative technical threshold
+    # In weak regimes, lower the bar for tech score and weight sentiment/pattern more
+    if regime in ("ranging", "high_volatility"):
+        tech_threshold = 4      # relaxed from 7
+        tech_weight    = 0.20   # de-emphasise technicals
+        sent_weight    = 0.45
+        pat_weight     = 0.35
+    elif regime == "trending_bear":
+        tech_threshold = 6
+        tech_weight    = 0.30
+        sent_weight    = 0.40
+        pat_weight     = 0.30
+    else:  # trending_bull or unknown
+        tech_threshold = 6
+        tech_weight    = 0.40
+        sent_weight    = 0.30
+        pat_weight     = 0.30
+
+    # FIX 1: Weighted composite score (0-100)
+    tech_norm    = (tech / 10) * 100
+    sent_norm    = (sentiment + 1) / 2 * 100          # map -1..+1 → 0..100
+    pat_norm     = min(100, max(0, 50 + pattern_ev * 5))  # centre at 50, ±10% EV = ±50pts
+    winrate_norm = win_rate                            # already 0-100
+
+    # ML probability (0-1) → 0-100, weighted heavily if available
+    ml_proba         = scores.get("ml_proba")
+    intraday_ml_prob = scores.get("intraday_ml_proba")
+
+    if ml_proba is not None and intraday_ml_prob is not None:
+        ml_norm = (ml_proba * 0.5 + intraday_ml_prob * 0.5) * 100  # average both models
+        composite = (
+            tech_norm    * tech_weight  * 0.6 +
+            sent_norm    * sent_weight  * 0.6 +
+            pat_norm     * pat_weight   * 0.7 * 0.6 +
+            winrate_norm * pat_weight   * 0.3 * 0.6 +
+            ml_norm      * 0.4
+        )
+    elif ml_proba is not None:
+        ml_norm = ml_proba * 100
+        composite = (
+            tech_norm    * tech_weight  * 0.6 +
+            sent_norm    * sent_weight  * 0.6 +
+            pat_norm     * pat_weight   * 0.7 * 0.6 +
+            winrate_norm * pat_weight   * 0.3 * 0.6 +
+            ml_norm      * 0.4
+        )
+    else:
+        composite = (
+            tech_norm    * tech_weight +
+            sent_norm    * sent_weight +
+            pat_norm     * pat_weight * 0.7 +
+            winrate_norm * pat_weight * 0.3
+        )
+
+    # Minimum bars: tech must clear regime threshold, sentiment must not be strongly negative
+    # + backtest-validated filters: uptrend (above EMA50), MACD bullish, volume > 1.5× avg
+    trend        = scores.get("trend", "sideways")
+    macd_signal  = scores.get("macd_signal", "neutral")
+    volume_ratio = scores.get("volume_ratio", 1.0)
+
+    filters_pass = (
+        trend == "up" and
+        macd_signal == "bullish" and
+        volume_ratio >= 1.0
+    )
+
+    if tech >= tech_threshold and sentiment >= -0.1 and composite >= 55 and filters_pass:
         sl = round(price * 0.99, 2)
         target = round(price * 1.025, 2)
-        confidence = min(95, int(tech * 8 + sentiment * 10 + pattern_ev * 5))
+        confidence = min(95, int(composite))
         return {"decision": "BUY", "confidence": confidence, "entry": price,
-                "stop_loss": sl, "target": target, "reasoning": "Strong technical + positive sentiment + positive pattern EV"}
+                "stop_loss": sl, "target": target,
+                "reasoning": f"Composite score {composite:.0f}/100 (tech={tech}, sent={sentiment:.2f}, pat_ev={pattern_ev:.1f}%)"}
 
-    if tech <= 3 or sentiment <= -0.5:
+    if composite < 35 or sentiment <= -0.5:
         return {"decision": "SKIP", "confidence": 70, "entry": price,
-                "stop_loss": 0.0, "target": 0.0, "reasoning": "Weak technicals or negative sentiment"}
+                "stop_loss": 0.0, "target": 0.0,
+                "reasoning": f"Weak composite {composite:.0f}/100 or negative sentiment"}
 
-    return {"decision": "HOLD", "confidence": 50, "entry": price,
-            "stop_loss": 0.0, "target": 0.0, "reasoning": "Mixed signals, no clear edge"}
+    # Composite ok but filters didn't pass — explain why
+    filter_reasons = []
+    if trend != "up":           filter_reasons.append(f"trend={trend}")
+    if macd_signal != "bullish": filter_reasons.append(f"MACD={macd_signal}")
+    if volume_ratio < 1.0:      filter_reasons.append(f"vol={volume_ratio:.1f}×avg")
+
+    hold_reason = f"Composite {composite:.0f}/100 but filters: {', '.join(filter_reasons)}" if filter_reasons else f"Mixed signals — composite {composite:.0f}/100"
+    return {"decision": "HOLD", "confidence": int(composite), "entry": price,
+            "stop_loss": 0.0, "target": 0.0, "reasoning": hold_reason}
 
 
 class MasterAgent(Agent):
@@ -159,6 +252,12 @@ class MasterAgent(Agent):
             "technical_score": tech.get("technical_score", 0),
             "rsi": tech.get("rsi", 50),
             "macd_signal": tech.get("macd_signal", "neutral"),
+            "trend": tech.get("trend", "sideways"),
+            "volume_ratio": tech.get("volume_ratio", 1.0),
+            "intraday_rsi5":   tech.get("intraday_rsi5"),
+            "intraday_macd":   tech.get("intraday_macd"),
+            "intraday_score":  tech.get("intraday_score"),
+            "intraday_vs_vwap": tech.get("intraday_vs_vwap"),
             "sentiment": news.get("sentiment", 0),
             "tier": news.get("tier"),
             "pattern_ev": pattern.get("expected_value", 0),
@@ -166,13 +265,65 @@ class MasterAgent(Agent):
             "regime": regime.get("regime", "unknown"),
         }
 
-        # 4. Emergency override: TIER 1 news
-        if scores["tier"] == 1:
-            logger.warning(f"{symbol}: TIER 1 news detected — emergency skip")
+        # ML signal (daily global model)
+        try:
+            from ml_model import predict as ml_predict
+            ml = ml_predict(symbol)
+            scores["ml_proba"]  = ml["ml_proba"]
+            scores["ml_signal"] = ml["ml_signal"]
+            logger.info(f"{symbol}: ML signal={ml['ml_signal']} proba={ml['ml_proba']:.3f}")
+        except Exception as e:
+            logger.debug(f"ML predict skipped: {e}")
+            scores["ml_proba"]  = None
+            scores["ml_signal"] = None
+
+        # India intraday model (1h, NSE-specific)
+        try:
+            from india_intraday_model import predict as intraday_predict, dynamic_threshold
+            intra = intraday_predict(symbol)
+
+            # Compute dynamic threshold from current conditions
+            import yfinance as _yf
+            vix_val = 16.0
+            try:
+                vix_df = _yf.Ticker("^INDIAVIX").history(period="2d")
+                if not vix_df.empty:
+                    vix_val = float(vix_df["Close"].iloc[-1])
+            except Exception:
+                pass
+
+            from india_intraday_model import _fo_expiry_days
+            import pandas as _pd
+            fo_days = int(_fo_expiry_days(_pd.DatetimeIndex([_pd.Timestamp.now()])).iloc[0])
+            dyn_thresh = dynamic_threshold(
+                vix=vix_val,
+                regime=scores.get("regime", "unknown"),
+                hour=_pd.Timestamp.now().hour,
+                fo_days=fo_days,
+            )
+            # Override signal based on dynamic threshold
+            intra_signal = "BUY" if intra["intraday_proba"] >= dyn_thresh else \
+                           ("HOLD" if intra["intraday_proba"] >= dyn_thresh - 0.10 else "SKIP")
+
+            scores["intraday_ml_proba"]   = intra["intraday_proba"]
+            scores["intraday_ml_signal"]  = intra_signal
+            scores["intraday_threshold"]  = dyn_thresh
+            scores["vix_live"]            = round(vix_val, 2)
+            logger.info(f"{symbol}: Intraday ML={intra_signal} proba={intra['intraday_proba']:.3f} "
+                        f"dyn_thresh={dyn_thresh} VIX={vix_val:.1f} FO_days={fo_days}")
+        except Exception as e:
+            logger.debug(f"Intraday ML skipped: {e}")
+            scores["intraday_ml_proba"]  = None
+            scores["intraday_ml_signal"] = None
+            scores["intraday_threshold"] = 0.55
+
+        # 4. Emergency override: TIER 1 news + FinBERT confirms negative sentiment
+        if scores["tier"] == 1 and scores["sentiment"] < -0.2:
+            logger.warning(f"{symbol}: TIER 1 news + negative sentiment — emergency skip")
             return self._result({
                 "symbol": symbol, "decision": "SKIP", "confidence": 95,
                 "entry_price": price, "stop_loss": 0.0, "target": 0.0,
-                "position_size": 0.0, "reasoning": "TIER 1 emergency news",
+                "position_size": 0.0, "reasoning": "TIER 1 emergency news + negative sentiment confirmed",
                 "agent_scores": scores,
             })
 
@@ -190,6 +341,19 @@ class MasterAgent(Agent):
         if confidence < 60 and decision == "BUY":
             decision = "HOLD"
             reasoning = f"Confidence too low ({confidence}%) — holding"
+
+        # 7b. Hard filter gate — backtest-validated: uptrend + MACD bullish + volume >= 1×avg
+        if decision == "BUY":
+            trend       = scores.get("trend", "sideways")
+            macd_signal = scores.get("macd_signal", "neutral")
+            vol_ratio   = scores.get("volume_ratio", 1.0)
+            if trend != "up" or macd_signal != "bullish" or vol_ratio < 1.0:
+                blocked = []
+                if trend != "up":           blocked.append(f"trend={trend}")
+                if macd_signal != "bullish": blocked.append(f"MACD={macd_signal}")
+                if vol_ratio < 1.0:         blocked.append(f"vol={vol_ratio:.1f}×")
+                decision = "HOLD"
+                reasoning = f"LLM said BUY but filters blocked: {', '.join(blocked)}"
 
         # 8. Risk manager for position sizing
         position_size = 0.0
