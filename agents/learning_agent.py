@@ -66,21 +66,30 @@ class LearningAgent(Agent):
         return weights
 
     def weekly_analysis(self, symbol: str) -> str:
-        """Compute weekly performance stats from trade history."""
+        """Compute performance stats from closed trades in the last 7 days.
+
+        Earlier this method ignored its name and just returned the last 20
+        trades regardless of date. Fixed in `fix/verification-findings` (B13).
+        """
         try:
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
-            trades = conn.execute("""
+            trades = conn.execute(
+                """
                 SELECT * FROM trades
-                WHERE symbol=? AND outcome != 'open'
-                ORDER BY exit_date DESC LIMIT 20
-            """, (symbol,)).fetchall()
+                WHERE symbol = ?
+                  AND outcome != 'open'
+                  AND exit_date >= datetime('now', '-7 days')
+                ORDER BY exit_date DESC
+                """,
+                (symbol,),
+            ).fetchall()
             conn.close()
         except Exception:
             return f"{symbol}: No trade history yet."
 
         if not trades:
-            return f"{symbol}: No closed trades yet."
+            return f"{symbol}: No closed trades in the last 7 days."
 
         pnls = [t["pnl_pct"] for t in trades if t["pnl_pct"] is not None]
         wins = [p for p in pnls if p > 0]

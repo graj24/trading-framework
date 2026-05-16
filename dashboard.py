@@ -15,6 +15,11 @@ import yfinance as yf
 
 sys.path.insert(0, str(Path(__file__).parent))
 from core.knowledge_base import kb_path, read_kb
+from core.costs import (
+    SLIPPAGE_FRAC,
+    BROKERAGE_FRAC,
+    ROUND_TRIP_COST_FRAC,
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 with open("config.yaml") as f:
@@ -56,7 +61,10 @@ def get_trades() -> pd.DataFrame:
     return df
 
 def pnl(entry, ltp, size):
-    pct = (ltp - entry) / entry * 100 - 0.06
+    # Round-trip cost (slippage both sides + brokerage both sides + STT on sell)
+    # expressed in percentage points. Was a lump-sum 0.06; now sourced from
+    # the canonical core.costs constants.
+    pct = (ltp - entry) / entry * 100 - ROUND_TRIP_COST_FRAC * 100
     inr = size * pct / 100
     return round(pct, 2), round(inr, 2)
 
@@ -288,7 +296,7 @@ with tab3:
                 exit_p, reason = row["Close"], "Close"
 
             pnl_pct = (exit_p - entry) / entry * 100
-            pnl_inr = (exit_p - entry) * qty - (entry + exit_p) * qty * 0.0003
+            pnl_inr = (exit_p - entry) * qty - (entry + exit_p) * qty * BROKERAGE_FRAC
             all_trades.append({"symbol": symbol, "date": date, "gap_pct": round(row["gap_pct"],2),
                                 "pnl_pct": round(pnl_pct,2), "pnl_inr": round(pnl_inr,2),
                                 "exit_reason": reason, "win": pnl_inr > 0})
@@ -433,8 +441,8 @@ with tab5:
 
                     TRAIN_END  = "2025-05-01"
                     TEST_START = "2025-05-01"
-                    SLIPPAGE   = 0.001
-                    BROKERAGE  = 0.0003
+                    SLIPPAGE   = SLIPPAGE_FRAC
+                    BROKERAGE  = BROKERAGE_FRAC
                     CAPITAL_BT = 10_000
                     POS_PCT    = 0.15
 

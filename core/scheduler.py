@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
+from core.watchlist import resolve_watchlist
+
 
 def _load_config() -> dict:
     with open("config.yaml") as f:
@@ -34,7 +36,7 @@ def job_update_knowledge_bases():
         from agents.data_agent import DataAgent
         config = _load_config()
         agent = DataAgent(config)
-        for symbol in config["watchlist"]:
+        for symbol in resolve_watchlist(config):
             agent.build_kb(symbol)
         logger.info("Knowledge bases updated")
     except Exception as e:
@@ -92,6 +94,10 @@ def job_preopen_scan():
                          f"{s['reasoning']}")
         for s in result.get("avoid_signals", []):
             logger.info(f"  🔴 Gap-down: {s['symbol']} {s['gap_pct']:+.1f}% — {s['reasoning']}")
+
+        # Anomaly: no pre-open data at all (API down or market holiday)
+        if not result.get("all_preopen"):
+            alerter.send("⚠️ <b>ANOMALY</b>: Pre-open scan returned 0 results — NSE API may be down or market is closed.")
     except Exception as e:
         logger.error(f"Pre-open scan failed: {e}")
 
@@ -119,7 +125,7 @@ def job_pre_market_analysis():
         config = _load_config()
         regime = RegimeAgent(config).run({})
         logger.info(f"Regime: {regime.data.get('regime', 'unknown')}")
-        for symbol in config["watchlist"]:
+        for symbol in resolve_watchlist(config):
             tech = TechnicalAgent(config).run({"symbol": symbol})
             logger.info(f"  {symbol}: score={tech.data.get('technical_score', 0)}/10")
     except Exception as e:
@@ -132,7 +138,7 @@ def job_generate_signals():
         from agents.master import MasterAgent
         config = _load_config()
         master = MasterAgent(config)
-        for symbol in config["watchlist"]:
+        for symbol in resolve_watchlist(config):
             result = master.run_for_stock(symbol)
             if result.ok():
                 d = result.data
@@ -152,10 +158,18 @@ def job_execute_trades():
         executor = ExecutionAgent(config)
         alerter = TelegramAlerter()
 
-        for symbol in config["watchlist"]:
+        for symbol in resolve_watchlist(config):
             result = master.run_for_stock(symbol)
             if result.ok() and result.data["decision"] == "BUY":
                 d = result.data
+                # CRIT-2: persist the entry-time signals so LearningAgent has
+                # something to learn from. See docs-verification/findings.md.
+                scores = d.get("agent_scores", {})
+                signals_at_entry = {
+                    "technical_score": scores.get("technical_score"),
+                    "sentiment":       scores.get("sentiment"),
+                    "pattern_ev":      scores.get("pattern_ev"),
+                }
                 trade = executor.execute_trade(
                     symbol=symbol,
                     entry_price=d["entry_price"],
@@ -163,6 +177,7 @@ def job_execute_trades():
                     target=d["target"],
                     position_size=d["position_size"],
                     reasoning=d["reasoning"],
+                    signals_at_entry=signals_at_entry,
                 )
                 alerter.trade_alert(symbol, "BUY", d["entry_price"],
                                     d["stop_loss"], d["target"], d["confidence"])
@@ -173,7 +188,10 @@ def job_execute_trades():
 
 def job_intraday_scan():
     """Run intraday pattern scanner — fires every 5 min during market hours."""
-    now = datetime.now()
+    # Always evaluate the gate in IST so the function works on any machine,
+    # not just the developer's IST laptop. See docs-verification/findings.md MED-6.
+    from zoneinfo import ZoneInfo
+    now = datetime.now(tz=ZoneInfo("Asia/Kolkata"))
     # Only run during market hours 9:15 AM - 3:00 PM IST
     if not (9 * 60 + 15 <= now.hour * 60 + now.minute <= 15 * 60):
         return
@@ -190,7 +208,9 @@ def job_intraday_scan():
         for r in result.get("buy_signals", []):
             p = r["best_pattern"]
             logger.info(f"  🟢 INTRADAY: {r['symbol']} — {p['description']}")
-            # Execute paper trade
+            # Execute paper trade. The intraday scanner doesn't surface a
+            # full agent_scores dict, so we record the pattern confidence
+            # under technical_score as a coarse proxy.
             executor.execute_trade(
                 symbol=r["symbol"],
                 entry_price=r.get("entry", r["ltp"]),
@@ -198,6 +218,11 @@ def job_intraday_scan():
                 target=p.get("target", r["ltp"] * 1.02),
                 position_size=config["trading"]["capital"] * 0.1,
                 reasoning=p["description"],
+                signals_at_entry={
+                    "technical_score": p.get("confidence", 0) / 10.0,
+                    "pattern_ev":      None,
+                    "sentiment":       None,
+                },
             )
             alerter.send(
                 f"📊 INTRADAY PATTERN: <b>{r['symbol']}</b>\n"
@@ -212,7 +237,7 @@ def job_intraday_scan():
 def job_monitor_positions():
     logger.info("👁️  Monitoring positions...")
     try:
-        from agents.execution_agent import ExecutionAgent
+        from agents.execution_agent import ExecutionAgent, today_pnl_pct
         from agents.news_agent import NewsAgent
         from core.alerts import TelegramAlerter
         config = _load_config()
@@ -226,8 +251,19 @@ def job_monitor_positions():
             alerter.exit_alert(trade["symbol"], trade["outcome"],
                                trade["pnl_pct"], trade["pnl_inr"])
 
+        # Anomaly: P&L approaching daily loss limit
+        capital = float(config.get("trading", {}).get("capital", 10000))
+        limit_pct = float(config.get("risk", {}).get("max_loss_per_day_pct", 3.0))
+        pnl = today_pnl_pct(capital)
+        warn_threshold = -(limit_pct * 0.75)   # alert at 75% of limit
+        if pnl <= warn_threshold:
+            alerter.send(
+                f"⚠️ <b>P&amp;L ALERT</b>: Today's P&amp;L is {pnl:+.2f}% "
+                f"(limit: -{limit_pct:.1f}%). Approaching daily loss limit."
+            )
+
         # Check news for open positions
-        alerts = news_agent.monitor_open_positions(config["watchlist"])
+        alerts = news_agent.monitor_open_positions(resolve_watchlist(config))
         for symbol, tier in alerts.items():
             if tier == 1:
                 result = executor.emergency_exit(symbol, "TIER 1 news")
@@ -260,46 +296,74 @@ def job_close_all_positions():
 
 
 def job_prune_watchlist():
-    """Prune stale stocks from watchlist, keep core + max 20 total."""
+    """Prune stale stocks from the *dynamic* watchlist (LOW-10).
+
+    config.yaml is treated as read-only. This job only ever rewrites
+    data/dynamic_watchlist.json. ``core_watchlist`` from config.yaml is
+    never pruned (it's user-curated and always retained).
+    """
     try:
+        import json
         import sqlite3
         from pathlib import Path
-        config = _load_config()
-        core = set(config.get("core_watchlist", []))
-        watchlist = config.get("watchlist", [])
-        max_size = config.get("watchlist_max", 20)
+        from core.watchlist import DEFAULT_DYNAMIC_PATH
 
-        if len(watchlist) <= max_size:
+        config = _load_config()
+        core = list(config.get("core_watchlist", []) or [])
+        max_size = int(config.get("watchlist_max", 20))
+
+        dyn_path = DEFAULT_DYNAMIC_PATH
+        if not dyn_path.exists():
+            return  # nothing to prune
+        try:
+            dynamic = json.loads(dyn_path.read_text())
+        except Exception:
+            dynamic = []
+
+        # Effective size = core + dynamic (deduped). If under the cap there's
+        # nothing to do.
+        if len(set(core) | set(dynamic)) <= max_size:
             return
 
+        # Recently active = symbols with a trade in the last 5 days.
         db = Path("paper_trades.db")
-        recent_active = set()
+        recent_active: set[str] = set()
         if db.exists():
             conn = sqlite3.connect(db)
-            # Keep stocks with trades in last 5 days
             rows = conn.execute(
                 "SELECT DISTINCT symbol FROM trades WHERE created_at > datetime('now', '-5 days')"
             ).fetchall()
             recent_active = {r[0] for r in rows}
             conn.close()
 
-        # Priority: core > recently traded > rest (by position in list = recency)
-        pruned = list(core)
-        for sym in watchlist:
-            if sym in core:
+        # Reserve room for core in the cap.
+        room = max_size - len(set(core))
+        # Priority within dynamic: recently active first, preserving order.
+        kept_dynamic: list[str] = []
+        seen: set[str] = set(core)
+        for sym in dynamic:
+            if sym in seen:
                 continue
-            if sym in recent_active or len(pruned) < max_size:
-                pruned.append(sym)
-            if len(pruned) >= max_size:
+            if sym in recent_active and len(kept_dynamic) < room:
+                kept_dynamic.append(sym)
+                seen.add(sym)
+        for sym in dynamic:
+            if sym in seen:
+                continue
+            if len(kept_dynamic) < room:
+                kept_dynamic.append(sym)
+                seen.add(sym)
+            else:
                 break
 
-        removed = set(watchlist) - set(pruned)
-        if removed:
-            config["watchlist"] = pruned
-            with open("config.yaml", "w") as f:
-                import yaml
-                yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
-            logger.info(f"Watchlist pruned: removed {removed}, kept {len(pruned)} stocks")
+        if kept_dynamic != dynamic:
+            dyn_path.parent.mkdir(parents=True, exist_ok=True)
+            dyn_path.write_text(json.dumps(kept_dynamic, indent=2))
+            removed = sorted(set(dynamic) - set(kept_dynamic))
+            logger.info(
+                f"Dynamic watchlist pruned: removed {removed}, "
+                f"kept {len(kept_dynamic)} symbols (core protects {len(core)} more)."
+            )
     except Exception as e:
         logger.error(f"Watchlist pruning failed: {e}")
 
@@ -319,7 +383,7 @@ def job_post_market():
         alerter.daily_summary(report)
         logger.info(f"Daily P&L: ₹{report['total_pnl_inr']:+.2f} ({report['total_pnl_pct']:+.2f}%)")
 
-        for symbol in config["watchlist"]:
+        for symbol in resolve_watchlist(config):
             analysis = learner.weekly_analysis(symbol)
             logger.info(f"  {analysis}")
     except Exception as e:

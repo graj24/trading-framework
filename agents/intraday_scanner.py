@@ -34,6 +34,12 @@ HEADERS = {
     "Referer": "https://www.nseindia.com/",
 }
 TIMEOUT = 8
+
+# Intraday candle fetch params for yfinance (used by `get_intraday_candles`).
+# Defined here so that imports + tests don't fail with NameError. See
+# docs/analysis/05-issues.md §B0c and docs-verification/findings.md HIGH-3.
+CANDLE_LOOKBACK = "2d"   # last 2 days — matches the function docstring.
+CANDLE_INTERVAL = "5m"   # 5-minute candles.
 NIFTY50 = [
     "RELIANCE","TCS","HDFCBANK","BHARTIARTL","ICICIBANK","INFOSYS","SBIN","HINDUNILVR",
     "ITC","KOTAKBANK","LT","AXISBANK","BAJFINANCE","MARUTI","TITAN","SUNPHARMA","WIPRO",

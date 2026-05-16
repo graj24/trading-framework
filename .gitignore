@@ -19,6 +19,14 @@ __pycache__/
 stocks/
 stocks_1h/
 
+# Graphify knowledge graph (regenerable, large)
+graphify-out/
+
 # IDE
 .idea/
 .vscode/
+
+# SQLite WAL/SHM temp files and backups
+*.db-shm
+*.db-wal
+*.db.bak.*

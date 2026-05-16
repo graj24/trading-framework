@@ -6,7 +6,28 @@ import yaml
 from dotenv import load_dotenv
 
 from core.logger import setup_logging
+from core.row_utils import row_get
 from agents.master import MasterAgent
+
+
+def _signals_at_entry(scores: dict) -> dict:
+    """Project the master `agent_scores` dict onto the columns persisted by
+    `ExecutionAgent.execute_trade`. Missing keys become NULL.
+
+    Note: ``sector_momentum`` and ``regime_alignment`` aren't directly emitted
+    by the current sub-agents — sector_momentum is approximated by the
+    sentiment of news in this stock's sector, and regime_alignment is
+    derived from the regime label. Until a richer feature set lands they
+    remain NULL, which is intentional: the LearningAgent only updates
+    weights for signals that were "positive" at entry, so NULL → no update.
+    """
+    return {
+        "technical_score": scores.get("technical_score"),
+        "sentiment":       scores.get("sentiment"),
+        "pattern_ev":      scores.get("pattern_ev"),
+        "sector_momentum": None,
+        "regime_alignment": None,
+    }
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -48,14 +69,32 @@ def main():
     master = MasterAgent(config)
     from agents.execution_agent import ExecutionAgent, _get_ltp, _pnl
     from agents.learning_agent import LearningAgent
+    from core.watchlist import resolve_watchlist
     executor = ExecutionAgent(config)
     learner  = LearningAgent(config)
 
     executed = []
 
-    for symbol in config["watchlist"]:
-        result = master.run_for_stock(symbol)
-        if not result.ok():
+    effective_watchlist = resolve_watchlist(config)
+
+    # B.9: fan out the per-stock master analysis to a thread pool. The
+    # work is mostly network-bound (yfinance, NSE, LLM); threads give a
+    # ~5× speed-up over the previous sequential loop.
+    from core.concurrency import map_symbols
+    results_by_symbol = map_symbols(
+        master.run_for_stock,
+        effective_watchlist,
+        max_workers=5,
+        label="master.run_for_stock",
+    )
+
+    # Iterate in the original watchlist order so log output is deterministic.
+    for symbol in effective_watchlist:
+        result = results_by_symbol.get(symbol)
+        if isinstance(result, BaseException):
+            logger.warning(f"{symbol}: master crashed — {result}")
+            continue
+        if result is None or not result.ok():
             continue
         d = result.data
         logger.info(f"{symbol}: {d['decision']} (conf={d['confidence']}%) — {d['reasoning']}")
@@ -81,6 +120,7 @@ def main():
                 target=d["target"],
                 position_size=d["position_size"],
                 reasoning=d["reasoning"],
+                signals_at_entry=_signals_at_entry(d.get("agent_scores", {})),
             )
             executed.append(trade)
             logger.info(f"  → Paper trade opened: {trade['trade_id']} | entry ₹{trade['entry_price']} | SL ₹{trade['stop_loss']} | T ₹{trade['target']}")
@@ -129,15 +169,25 @@ def main():
             wins = [t for t in closed_trades if t["pnl_inr"] and t["pnl_inr"] > 0]
             print(f"  Win rate          : {len(wins)}/{len(closed_trades)} ({len(wins)/len(closed_trades)*100:.0f}%)")
             print(f"  Total realised P&L: ₹{total_realised:+,.2f}")
-            # Update signal weights from closed trades
-            for t in closed_trades:
+            # Update signal weights — only for trades whose weights have not
+            # yet been applied (B2: prevents re-applying the same trade on
+            # every run).
+            from agents.execution_agent import (
+                fetch_unweighted_closed_trades,
+                mark_trade_weights_applied,
+            )
+            unweighted = fetch_unweighted_closed_trades(db)
+            for t in unweighted:
                 outcome = "win" if t["pnl_inr"] and t["pnl_inr"] > 0 else "loss"
                 learner.update_weights(t["symbol"], outcome, {
-                    "technical_score": t.get("technical_score", 0),
-                    "news_sentiment":  t.get("sentiment", 0),
-                    "pattern_ev":      t.get("pattern_ev", 0),
+                    "technical_score": row_get(t, "technical_score", 0) or 0,
+                    "news_sentiment":  row_get(t, "sentiment", 0) or 0,
+                    "pattern_ev":      row_get(t, "pattern_ev", 0) or 0,
                 })
+                mark_trade_weights_applied(db, t["id"])
                 logger.info(f"  → LearningAgent updated weights for {t['symbol']} ({outcome})")
+            if not unweighted:
+                logger.info(f"  → LearningAgent: no new closed trades to apply weights for")
         conn.close()
     else:
         print(f"\n  No trade history yet.")

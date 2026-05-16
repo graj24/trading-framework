@@ -66,14 +66,15 @@ class StockSentimentPipeline:
         """Export results to JSON file."""
         if filename is None:
             filename = f"sentiment_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        
-        filepath = f"/Users/anantamanoranjan/Desktop/ripple/output/{filename}"
-        
+
+        from ripple.config import OUTPUT_DIR
+        filepath = f"{OUTPUT_DIR}/{filename}"
+
         # Create output directory if needed
         import os
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
-        
+
         with open(filepath, 'w') as f:
             json.dump(results, f, indent=2)
-        
+
         return filepath

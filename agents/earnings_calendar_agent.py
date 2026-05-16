@@ -136,6 +136,74 @@ def fetch_earnings_calendar_yf(symbol: str) -> Optional[str]:
     return None
 
 
+# ── B9: Yahoo Finance EPS consensus ──────────────────────────────────────────
+
+def fetch_eps_consensus(symbol: str) -> dict:
+    """Scrape EPS estimate vs actual from Yahoo Finance analysis page.
+
+    Returns:
+        {
+          "symbol": str,
+          "eps_estimate": float | None,   # analyst consensus EPS estimate
+          "eps_actual":   float | None,   # reported EPS (most recent quarter)
+          "beat_pct":     float | None,   # (actual - estimate) / |estimate| * 100
+          "verdict":      "BEAT"|"MISS"|"INLINE"|"UNKNOWN",
+          "source":       "yahoo_finance",
+        }
+    """
+    result: dict = {
+        "symbol": symbol,
+        "eps_estimate": None,
+        "eps_actual": None,
+        "beat_pct": None,
+        "verdict": "UNKNOWN",
+        "source": "yahoo_finance",
+    }
+    try:
+        t = yf.Ticker(symbol + ".NS")
+
+        # yfinance exposes earnings history directly
+        eh = t.earnings_history
+        if eh is not None and not eh.empty:
+            # Most recent row
+            row = eh.iloc[-1]
+            est = row.get("epsEstimate") if hasattr(row, "get") else row["epsEstimate"]
+            act = row.get("epsActual")   if hasattr(row, "get") else row["epsActual"]
+            if est is not None and act is not None:
+                try:
+                    est_f = float(est)
+                    act_f = float(act)
+                    result["eps_estimate"] = round(est_f, 4)
+                    result["eps_actual"]   = round(act_f, 4)
+                    if abs(est_f) > 1e-6:
+                        beat_pct = (act_f - est_f) / abs(est_f) * 100
+                        result["beat_pct"] = round(beat_pct, 2)
+                        if beat_pct > 5:
+                            result["verdict"] = "BEAT"
+                        elif beat_pct < -5:
+                            result["verdict"] = "MISS"
+                        else:
+                            result["verdict"] = "INLINE"
+                except (TypeError, ValueError):
+                    pass
+
+        # Fallback: try analyst_price_targets / info for forward EPS
+        if result["verdict"] == "UNKNOWN":
+            info = t.info or {}
+            fwd_eps = info.get("forwardEps")
+            trail_eps = info.get("trailingEps")
+            if fwd_eps and trail_eps:
+                result["eps_estimate"] = round(float(fwd_eps), 4)
+                result["eps_actual"]   = round(float(trail_eps), 4)
+                # Can't compute beat/miss without quarterly granularity
+                result["verdict"] = "UNKNOWN"
+
+    except Exception as e:
+        logger.debug("fetch_eps_consensus(%s) failed: %s", symbol, e)
+
+    return result
+
+
 # ── Result Scoring ────────────────────────────────────────────────────────────
 
 BEAT_KEYWORDS = {
@@ -151,9 +219,14 @@ MISS_KEYWORDS = {
 INLINE_KEYWORDS = {"inline", "in line", "meets", "as expected", "flat", "stable"}
 
 
-def score_result(subject: str, content: str = "") -> dict:
+def score_result(subject: str, content: str = "", eps_consensus: dict | None = None) -> dict:
     """
     Score an earnings result filing as BEAT / MISS / INLINE.
+
+    B9: when ``eps_consensus`` is provided (from fetch_eps_consensus), the
+    quantitative EPS beat/miss overrides the keyword heuristic and raises
+    confidence significantly.
+
     Returns: {verdict, confidence, signal, reasoning}
     """
     text = (subject + " " + content).lower()
@@ -164,22 +237,28 @@ def score_result(subject: str, content: str = "") -> dict:
 
     total = beat_count + miss_count + inline_count or 1
 
+    # Keyword-based baseline
     if beat_count > miss_count and beat_count > inline_count:
-        verdict = "BEAT"
-        confidence = min(0.95, beat_count / total)
-        signal = "BUY"
+        verdict, confidence, signal = "BEAT", min(0.75, beat_count / total), "BUY"
     elif miss_count > beat_count and miss_count > inline_count:
-        verdict = "MISS"
-        confidence = min(0.95, miss_count / total)
-        signal = "AVOID"
+        verdict, confidence, signal = "MISS", min(0.75, miss_count / total), "AVOID"
     elif inline_count > 0:
-        verdict = "INLINE"
-        confidence = 0.5
-        signal = "NEUTRAL"
+        verdict, confidence, signal = "INLINE", 0.5, "NEUTRAL"
     else:
-        verdict = "UNKNOWN"
-        confidence = 0.3
-        signal = "NEUTRAL"
+        verdict, confidence, signal = "UNKNOWN", 0.3, "NEUTRAL"
+
+    # B9: override with quantitative EPS data when available
+    eps_note = ""
+    if eps_consensus and eps_consensus.get("verdict") not in (None, "UNKNOWN"):
+        q_verdict = eps_consensus["verdict"]
+        beat_pct  = eps_consensus.get("beat_pct", 0) or 0
+        est       = eps_consensus.get("eps_estimate")
+        act       = eps_consensus.get("eps_actual")
+        verdict   = q_verdict
+        signal    = "BUY" if q_verdict == "BEAT" else ("AVOID" if q_verdict == "MISS" else "NEUTRAL")
+        # Higher confidence for larger beats/misses
+        confidence = min(0.95, 0.65 + abs(beat_pct) / 100)
+        eps_note = f" | EPS est={est} act={act} ({beat_pct:+.1f}%)"
 
     return {
         "verdict": verdict,
@@ -187,7 +266,7 @@ def score_result(subject: str, content: str = "") -> dict:
         "signal": signal,
         "beat_signals": beat_count,
         "miss_signals": miss_count,
-        "reasoning": f"{verdict}: {beat_count} positive / {miss_count} negative keywords in filing",
+        "reasoning": f"{verdict}: {beat_count} positive / {miss_count} negative keywords{eps_note}",
     }
 
 
@@ -387,8 +466,9 @@ class EarningsCalendarAgent(Agent):
 
                 logger.info(f"  📄 {symbol}: filing detected — '{subject[:60]}'")
 
-                # Score the result
-                result_score = score_result(subject)
+                # Score the result — augment with quantitative EPS data (B9)
+                eps_consensus = fetch_eps_consensus(symbol)
+                result_score = score_result(subject, eps_consensus=eps_consensus)
 
                 # Get historical reaction
                 historical = compute_historical_earnings_reaction(symbol)

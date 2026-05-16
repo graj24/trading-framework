@@ -1,6 +1,11 @@
 from __future__ import annotations
+from __future__ import annotations
 """Market Regime Detection Agent — bull/bear/ranging/volatile classification."""
+
 import logging
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -112,6 +117,107 @@ class RegimeAgent(Agent):
         except Exception as e:
             logger.exception("RegimeAgent failed")
             return self._error(str(e))
+
+
+# ── P2 §18: Stock-specific regime ────────────────────────────────────────────
+
+_REGIME_PRIORITY = {
+    "trending_bull":   3,
+    "ranging":         2,
+    "high_volatility": 1,
+    "trending_bear":   0,
+}
+
+
+def compute_stock_regime(symbol: str, lookback: int = 60) -> Optional[dict]:
+    """Compute regime for a single stock from its local price_history.parquet.
+
+    Returns the same dict shape as RegimeAgent.run().data, or None if data
+    is unavailable.  Does NOT make any network calls.
+    """
+    from core.knowledge_base import kb_path
+
+    path = kb_path(symbol) / "price_history.parquet"
+    if not path.exists():
+        return None
+    try:
+        df = pd.read_parquet(path).sort_index()
+        df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
+        df = df.dropna(subset=["High", "Low", "Close"])
+        if len(df) < lookback:
+            return None
+
+        df = df.tail(lookback).copy()
+        high, low, close = df["High"], df["Low"], df["Close"]
+
+        adx        = compute_adx(high, low, close, 14)
+        ret_20d    = float((close.iloc[-1] / close.iloc[-20] - 1) * 100)
+        volatility = float(close.pct_change().tail(20).std() * np.sqrt(252) * 100)
+
+        if adx > 25 and ret_20d > 2:
+            regime = "trending_bull"
+        elif adx > 25 and ret_20d < -2:
+            regime = "trending_bear"
+        elif volatility > 20:
+            regime = "high_volatility"
+        else:
+            regime = "ranging"
+
+        confidence = min(1.0, 0.5 + abs(adx - 25) / 50 + abs(ret_20d) / 20)
+
+        return {
+            "regime":     regime,
+            "confidence": round(confidence, 3),
+            "adx":        round(adx, 2),
+            "volatility": round(volatility, 2),
+            "return_20d": round(ret_20d, 2),
+            "source":     "stock",
+        }
+    except Exception as e:
+        logger.debug("compute_stock_regime(%s) failed: %s", symbol, e)
+        return None
+
+
+def blend_regimes(nifty_regime: dict, stock_regime: Optional[dict],
+                  stock_weight: float = 0.4) -> dict:
+    """Blend NIFTY-level and stock-level regimes.
+
+    When the stock is in a bear regime inside a bull market (or vice versa),
+    the blended result reflects the stock's divergence.
+
+    ``stock_weight`` controls how much the stock-specific signal overrides
+    the market regime (default 40%).  The remaining 60% comes from NIFTY.
+
+    Returns a dict with the same keys as RegimeAgent output, plus
+    ``stock_regime`` and ``blend_note``.
+    """
+    if stock_regime is None:
+        return {**nifty_regime, "stock_regime": None, "blend_note": "nifty_only"}
+
+    nifty_r = nifty_regime.get("regime", "ranging")
+    stock_r = stock_regime.get("regime", "ranging")
+
+    nifty_pri = _REGIME_PRIORITY.get(nifty_r, 2)
+    stock_pri = _REGIME_PRIORITY.get(stock_r, 2)
+
+    blended_pri = nifty_pri * (1 - stock_weight) + stock_pri * stock_weight
+    sorted_regimes = sorted(_REGIME_PRIORITY.items(), key=lambda x: abs(x[1] - blended_pri))
+    blended_regime = sorted_regimes[0][0]
+
+    blended_conf = (
+        nifty_regime.get("confidence", 0.5) * (1 - stock_weight)
+        + stock_regime.get("confidence", 0.5) * stock_weight
+    )
+
+    note = "aligned" if nifty_r == stock_r else f"divergent({nifty_r}↔{stock_r})"
+
+    return {
+        **nifty_regime,
+        "regime":       blended_regime,
+        "confidence":   round(blended_conf, 3),
+        "stock_regime": stock_r,
+        "blend_note":   note,
+    }
 
 
 if __name__ == '__main__':

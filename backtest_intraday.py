@@ -25,8 +25,11 @@ from india_intraday_model import build_features, DATA_DIR, MODEL_PATH
 THRESHOLD    = 0.55   # min probability to enter
 CAPITAL      = 10_000
 POSITION_PCT = 0.15
-SLIPPAGE     = 0.001
-BROKERAGE    = 0.0003
+
+# Cost constants — single source of truth in core.costs (was inline 0.001/0.0003,
+# diverged from production). See docs-verification/findings.md MED-7.
+from core.costs import SLIPPAGE_FRAC as SLIPPAGE
+from core.costs import BROKERAGE_FRAC as BROKERAGE
 STOP_PCT     = 1.0    # initial SL below entry (%)
 TARGET_PCT   = 2.5    # target above entry (%)
 TRAIL_PCT    = 0.5    # trailing stop distance once in profit (%)

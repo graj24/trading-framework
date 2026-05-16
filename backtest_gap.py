@@ -25,7 +25,11 @@ with open("config.yaml") as f:
 
 CAPITAL      = config["trading"]["capital"]
 POSITION_PCT = 0.15          # 15% of capital per trade
-SLIPPAGE     = 0.001
+
+# Cost constants from core.costs — was inline SLIPPAGE=0.001, BROKERAGE=0.0003.
+# See docs-verification/findings.md MED-7.
+from core.costs import SLIPPAGE_FRAC as SLIPPAGE
+from core.costs import BROKERAGE_FRAC as BROKERAGE
 GAP_THRESHOLD = float(sys.argv[1]) if len(sys.argv) > 1 else 2.0  # %
 
 symbols = config["watchlist"]
@@ -98,7 +102,7 @@ for symbol in symbols:
             exit_price  = close
             exit_reason = "Close"
 
-        brokerage = (entry + exit_price) * qty * 0.0003
+        brokerage = (entry + exit_price) * qty * BROKERAGE
         pnl_pct   = (exit_price - entry) / entry * 100
         pnl_inr   = (exit_price - entry) * qty - brokerage
 

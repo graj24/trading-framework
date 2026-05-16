@@ -72,10 +72,15 @@ class PatternAgent(Agent):
 
         for idx, dist in top_matches:
             match_end = idx + WINDOW - 1
-            future_idx = match_end + LOOKAHEAD
-            if future_idx >= len(prices):
+            # B7: entry happens on the bar AFTER the matched window; that's
+            # the right anchor for measuring the trade outcome. Anchoring
+            # on `match_end` over-states EV when the window ended on a
+            # strong day.
+            entry_idx = match_end + 1
+            future_idx = entry_idx + LOOKAHEAD
+            if future_idx >= len(prices) or entry_idx >= len(prices):
                 continue
-            outcome_pct = (prices[future_idx] - prices[match_end]) / prices[match_end] * 100
+            outcome_pct = (prices[future_idx] - prices[entry_idx]) / prices[entry_idx] * 100
             outcomes.append(outcome_pct)
             similarity = round(1.0 / (1.0 + dist), 4)
             date_val = str(dates[match_end])[:10] if len(dates) > match_end else "unknown"
