@@ -122,7 +122,9 @@ RECENT JOURNAL:
 {state['journal_tail'][-500:]}
 {cold_start}
 You can call tools (read_file, write_file, run_shell, run_pytest, web_fetch, web_search,
-sql_query, memory_store, memory_search) as many times as needed before deciding.
+sql_query, get_prices, memory_store, memory_search) as many times as needed before deciding.
+RULE: Before forming any entry/exit price hypothesis, call get_prices() to get real current prices.
+Never guess or use training-data prices — NSE prices change daily.
 
 When done, return a JSON object as your final message:
 {{

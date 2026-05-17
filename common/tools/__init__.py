@@ -222,6 +222,29 @@ def sql_query(pm_id: str, sql: str) -> str:
         return f"ERROR: {e}"
 
 
+def get_prices(pm_id: str, symbols: list) -> str:
+    """Fetch current NSE prices for a list of symbols via yfinance."""
+    try:
+        import yfinance as yf
+        results = []
+        for sym in symbols[:15]:  # cap at 15
+            ticker = sym if sym.endswith(".NS") else f"{sym}.NS"
+            try:
+                h = yf.Ticker(ticker).history(period="2d")
+                if h.empty:
+                    results.append(f"{sym}: no data")
+                    continue
+                close = float(h["Close"].iloc[-1])
+                prev = float(h["Close"].iloc[-2]) if len(h) > 1 else close
+                chg = ((close - prev) / prev * 100) if prev else 0
+                results.append(f"{sym}: ₹{close:.2f} ({chg:+.2f}%)")
+            except Exception as e:
+                results.append(f"{sym}: error ({e})")
+        return "\n".join(results)
+    except ImportError:
+        return "ERROR: yfinance not installed"
+
+
 def memory_store(pm_id: str, key: str, content: str) -> str:
     """Store a research finding in PM's persistent memory."""
     from common.memory import get_store
@@ -347,6 +370,21 @@ def get_tool_schemas() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "get_prices",
+                "description": "Fetch current NSE prices for a list of symbols. ALWAYS call this before forming any entry/exit hypothesis — never guess prices.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": {"type": "array", "items": {"type": "string"},
+                                    "description": "NSE symbols without .NS suffix (e.g. ['RELIANCE', 'INFY', 'TITAN'])"},
+                    },
+                    "required": ["symbols"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "memory_store",
                 "description": "Store a research finding or insight in your persistent memory for future cycles.",
                 "parameters": {
@@ -388,6 +426,7 @@ def dispatch(pm_id: str, tool_name: str, args: dict) -> str:
         "web_fetch": web_fetch,
         "web_search": web_search,
         "sql_query": sql_query,
+        "get_prices": get_prices,
         "memory_store": memory_store,
         "memory_search": memory_search,
     }
