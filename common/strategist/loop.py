@@ -155,14 +155,25 @@ When done, return a JSON object as your final message:
             tool_calls_made = 0
 
             while tool_calls_made < MAX_TOOL_CALLS:
-                resp = litellm.completion(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    tool_choice="auto",
-                    max_tokens=1000,
-                    temperature=0.2,
-                )
+                # Retry with backoff on 429
+                for attempt in range(4):
+                    try:
+                        resp = litellm.completion(
+                            model=model,
+                            messages=messages,
+                            tools=tools,
+                            tool_choice="auto",
+                            max_tokens=1000,
+                            temperature=0.2,
+                        )
+                        break
+                    except Exception as e:
+                        if "429" in str(e) and attempt < 3:
+                            wait = 2 ** attempt * 5  # 5, 10, 20s
+                            logger.warning(f"PM{self.pm_id} rate limited, retrying in {wait}s")
+                            time.sleep(wait)
+                        else:
+                            raise
                 msg = resp.choices[0].message
 
                 # If LLM made tool calls, execute them and continue
@@ -367,6 +378,13 @@ Return ONLY valid JSON."""
 
         cursor = int(self._cursor_path.read_text().strip()) if self._cursor_path.exists() else get_bus().latest_id()
         logger.info(f"PM{self.pm_id} Strategist started — cursor={cursor}, interval={interval_min}min")
+
+        # Stagger PMs so they don't fire simultaneously.
+        # PM1 starts immediately; PM2 waits half the interval.
+        stagger = (int(self.pm_id) - 1) * (interval_min * 60 / 2)
+        if stagger > 0:
+            logger.info(f"PM{self.pm_id} staggering {stagger:.0f}s to avoid rate limit collision")
+            time.sleep(stagger)
 
         last_interval_cycle = time.time()
 
