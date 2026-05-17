@@ -37,9 +37,25 @@ def _multica_create_agent(name: str, system_prompt: str) -> dict | None:
         logger.warning(f"MULTICA_TOKEN not set — skipping Multica agent creation for {name}")
         return None
     try:
+        # Discover workspace_id from the API
+        ws_resp = requests.get(
+            f"{MULTICA_SERVER}/api/workspaces",
+            headers={"Authorization": f"Bearer {MULTICA_TOKEN}"},
+            timeout=10,
+        )
+        workspace_id = None
+        if ws_resp.status_code == 200:
+            workspaces = ws_resp.json()
+            if workspaces:
+                workspace_id = workspaces[0]["id"]
+
+        payload = {"name": name, "system_prompt": system_prompt, "provider": "kiro"}
+        if workspace_id:
+            payload["workspace_id"] = workspace_id
+
         resp = requests.post(
             f"{MULTICA_SERVER}/api/agents",
-            json={"name": name, "system_prompt": system_prompt, "provider": "kiro"},
+            json=payload,
             headers={"Authorization": f"Bearer {MULTICA_TOKEN}"},
             timeout=15,
         )
