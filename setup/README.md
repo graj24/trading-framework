@@ -116,55 +116,11 @@ sudo systemctl restart trading-daemon
 
 ## Portfolio Manager agents
 
-PM agents are managed via Multica at **http://13.232.42.85:3000**.
+See **`setup/MULTICA.md`** for the full Multica guide (adding PMs, assigning tasks, daemon ops, server ops).
 
-| Agent | Prompt file | Strategy |
-|---|---|---|
-| PM1 | `pm_prompts/PM1_full_prompt.md` | Multi-signal pipeline (inherited from human PM) |
-| PM2 | `pm_prompts/PM2_full_prompt.md` | Competes against PM1 |
-
-### As CEO — how to manage PMs
-- **Assign a task**: create an issue on the Multica board, assign to PM1 or PM2
-- **Pause a PM**: stop its trading daemon service on EC2
-- **Check P&L scoreboard**:
+Quick scoreboard:
 ```bash
-sqlite3 /app/paper_trades.db "
-SELECT pm_id, COUNT(*) trades, SUM(pnl_inr) total_pnl
-FROM trades WHERE outcome != 'open'
-GROUP BY pm_id ORDER BY total_pnl DESC;
-"
-```
-
-### Adding a new PM
-1. Create `pm_prompts/PM<N>.md` with competitive context
-2. Run `cat pm_prompts/TEMPLATE.md pm_prompts/PM<N>.md > pm_prompts/PM<N>_full_prompt.md`
-3. In Multica: Settings → Agents → New Agent → paste the full prompt
-4. Create `pm<N>/main.py` and `pm<N>/config.yaml` on EC2
-
-### Multica daemon (on trading EC2)
-The Multica daemon runs in the background and connects the trading EC2 to the Multica server:
-```bash
-multica daemon status   # check
-multica daemon start    # start
-multica daemon stop     # stop
-```
-Agent CLIs available: `kiro`, `claude`
-
----
-
-## Multica server operations (on multica EC2)
-
-```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.232.42.85
-
-# Check containers
-docker ps
-
-# Restart Multica
-cd ~ && docker compose -f docker-compose.selfhost.yml --env-file .env restart
-
-# View logs
-docker logs multica-backend-1 -f
+sqlite3 /app/paper_trades.db "SELECT pm_id, SUM(pnl_inr) total_pnl FROM trades WHERE outcome!='open' GROUP BY pm_id ORDER BY total_pnl DESC;"
 ```
 
 ---

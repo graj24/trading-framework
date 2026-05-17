@@ -63,6 +63,7 @@ TechnicalAgent + NewsAgent + PatternAgent + RegimeAgent → ML models (daily + 1
 
 ## Important docs
 - `setup/README.md` — full infrastructure, ops, cost, AWS resource IDs
+- `setup/MULTICA.md` — Multica agent platform (adding PMs, daemon ops, server ops)
 - `docs/user-guide.md` — install, configure, run
 - `docs/technical-reference.md` — all modules, APIs, schemas
 - `docs/analysis/` — architecture, data flow, agents, decision pipeline, issues, roadmap
