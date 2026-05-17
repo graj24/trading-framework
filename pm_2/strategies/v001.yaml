@@ -1,0 +1,19 @@
+_meta:
+  created_at: '2026-05-17T14:05:29.545838'
+  notes: cold-start seed (copy_from=None)
+  parent_version: null
+  version: 1
+autonomy:
+  can_fno: false
+  can_short: false
+  universe: any_nse
+data_sources:
+- yfinance
+description: Cold-start blank strategy. PM will evolve this on first cycle.
+gates: {}
+name: blank
+pipeline: passive_observe
+sizing:
+  amount: 1000
+  method: fixed
+watchlist: []
