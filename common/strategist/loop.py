@@ -177,7 +177,7 @@ When done, return a JSON object as your final message:
                 msg = resp.choices[0].message
 
                 # If LLM made tool calls, execute them and continue
-                if msg.tool_calls:
+                if getattr(msg, "tool_calls", None):
                     messages.append(msg)
                     for tc in msg.tool_calls:
                         fn_name = tc.function.name
