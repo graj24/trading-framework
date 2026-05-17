@@ -1,7 +1,7 @@
 import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, GitBranch, Users, FlaskConical,
-  RotateCcw, Settings, Server, Trophy, BookOpen,
+  RotateCcw, Settings, Server, Trophy, BookOpen, Activity,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/Tooltip";
@@ -16,6 +16,7 @@ const NAV = [
   { to: "/setup",      label: "Setup",       Icon: Settings },
   { to: "/infra",        label: "Infra",        Icon: Server },
   { to: "/architecture",label: "Architecture", Icon: BookOpen },
+  { to: "/services",    label: "Services",     Icon: Activity },
 ];
 
 export function Sidebar() {

@@ -37,6 +37,7 @@ export const api = {
     }),
   testService: (service: string) =>
     req<{ status: string; error?: string }>(`/api/env/test/${service}`, { method: "POST" }),
+  servicesHealth: () => req<Record<string, ServiceHealth>>("/api/services/health"),
   infra: () => req<InfraStatus>("/api/infra"),
   pms: () => req<PMSummary[]>("/api/pms"),
   pmState: (id: string) => req<PMState>(`/api/pms/${id}/state`),
@@ -238,4 +239,16 @@ export interface StrategyVersion {
   notes: string;
   parent_version: number | null;
   file: string;
+}
+
+export interface ServiceHealth {
+  status: "ok" | "error" | "degraded" | "unconfigured" | "not_required";
+  latency_ms?: number;
+  error?: string;
+  fix?: string;
+  detail?: string;
+  sample?: string;
+  model?: string;
+  bot?: string;
+  user?: string;
 }

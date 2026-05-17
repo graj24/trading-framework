@@ -13,6 +13,7 @@ import { PMCockpit } from "@/pages/PMCockpit";
 import { PMs } from "@/pages/PMs";
 import { Leaderboard } from "@/pages/Leaderboard";
 import { Architecture } from "@/pages/Architecture";
+import { Services } from "@/pages/Services";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 30000 } } });
@@ -37,6 +38,7 @@ function AppShell() {
             <Route path="/pms/:pmId" element={<PMCockpit />} />
             <Route path="/leaderboard" element={<Leaderboard />} />
             <Route path="/architecture" element={<Architecture />} />
+            <Route path="/services" element={<Services />} />
           </Routes>
         </main>
       </div>
