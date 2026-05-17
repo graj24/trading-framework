@@ -52,6 +52,51 @@ async def _mock_feed():
             })
 
 
+async def _real_feed():
+    """Push real yfinance prices for the full watchlist every 60s."""
+    import yfinance as yf
+    from core.config import get_config
+
+    prev_prices: dict = {}
+
+    while True:
+        await asyncio.sleep(60)
+        if not _clients:
+            continue
+        try:
+            config = get_config()
+            symbols = config.get("watchlist", [])[:50]
+            tickers = [f"{s}.NS" for s in symbols]
+
+            # Batch download — much faster than one-by-one
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(
+                None,
+                lambda: yf.download(tickers, period="2d", auto_adjust=True, progress=False, threads=True)
+            )
+
+            close = data.get("Close") if hasattr(data, "get") else data["Close"] if "Close" in data else None
+            if close is None or close.empty:
+                continue
+
+            for sym in symbols:
+                ticker = f"{sym}.NS"
+                try:
+                    col = close[ticker] if ticker in close.columns else None
+                    if col is None or col.dropna().empty:
+                        continue
+                    vals = col.dropna()
+                    price = float(vals.iloc[-1])
+                    prev = float(vals.iloc[-2]) if len(vals) > 1 else prev_prices.get(sym, price)
+                    change_pct = round((price - prev) / prev * 100, 2) if prev else 0.0
+                    prev_prices[sym] = price
+                    await broadcast({"type": "ltp_update", "symbol": sym, "price": price, "change_pct": change_pct})
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning(f"Real feed error: {e}")
+
+
 _feed_task: asyncio.Task | None = None
 
 
@@ -62,18 +107,49 @@ async def websocket_live(ws: WebSocket):
     _clients.add(ws)
     logger.info("WS client connected. Total: %d", len(_clients))
 
-    # Start mock feed if not running
+    # Start real feed if not running
     if _feed_task is None or _feed_task.done():
-        _feed_task = asyncio.create_task(_mock_feed())
+        _feed_task = asyncio.create_task(_real_feed())
 
     try:
-        # Send initial state
+        # Send initial snapshot immediately on connect
+        try:
+            import yfinance as yf
+            from core.config import get_config
+            config = get_config()
+            symbols = config.get("watchlist", [])[:50]
+            tickers = [f"{s}.NS" for s in symbols]
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(
+                None,
+                lambda: yf.download(tickers, period="2d", auto_adjust=True, progress=False, threads=True)
+            )
+            close = data["Close"] if "Close" in data else None
+            if close is not None and not close.empty:
+                for sym in symbols:
+                    ticker = f"{sym}.NS"
+                    try:
+                        col = close[ticker] if ticker in close.columns else None
+                        if col is None or col.dropna().empty:
+                            continue
+                        vals = col.dropna()
+                        price = float(vals.iloc[-1])
+                        prev = float(vals.iloc[-2]) if len(vals) > 1 else price
+                        change_pct = round((price - prev) / prev * 100, 2) if prev else 0.0
+                        await ws.send_text(json.dumps({
+                            "type": "ltp_update", "symbol": sym,
+                            "price": price, "change_pct": change_pct,
+                        }))
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.warning(f"Initial snapshot failed: {e}")
+
         await ws.send_text(json.dumps({
             "type": "connected",
             "timestamp": datetime.now().isoformat(),
             "message": "Bloomberg Terminal live feed connected",
         }))
-        # Keep alive — listen for client messages (ping/pong)
         while True:
             data = await ws.receive_text()
             msg = json.loads(data)
