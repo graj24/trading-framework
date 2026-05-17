@@ -14,6 +14,7 @@ There are two flavours:
 |------------------------------------------------|----------------------------------------|
 | Install and run the system                     | [`user-guide.md`](user-guide.md)       |
 | Understand the architecture / extend modules   | [`technical-reference.md`](technical-reference.md) |
+| Run / extend the 24/7 event-driven PM runtime  | [`pm-runtime-guide.md`](pm-runtime-guide.md) |
 | Learn how a single trade decision is made      | [`analysis/04-decision-pipeline.md`](analysis/04-decision-pipeline.md) |
 | See the system at a glance (diagrams)          | [`analysis/02-data-flow.md`](analysis/02-data-flow.md) |
 | Find known bugs / pick up TODOs                | [`analysis/05-issues.md`](analysis/05-issues.md) |
@@ -29,6 +30,7 @@ There are two flavours:
 |------------------------------------------------|-------------------|-----------------------------------------------------------------|
 | [`user-guide.md`](user-guide.md)               | End users         | Install, configure, run, dashboard, backtest, ML, troubleshoot, FAQ, glossary |
 | [`technical-reference.md`](technical-reference.md) | Engineers      | Architecture, module APIs, config schema, storage schemas, scheduler, ML pipeline, ops |
+| [`pm-runtime-guide.md`](pm-runtime-guide.md)   | Operators / engineers | The event-driven 24/7 PM runtime: event bus, daemons, kill switch, `/pms` page, ops runbooks |
 
 ### Internal analysis (`analysis/`)
 

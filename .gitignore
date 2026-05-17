@@ -32,3 +32,18 @@ graphify-out/
 *.db-shm
 *.db-wal
 *.db.bak.*
+
+# PM runtime — per-PM workspaces are provisioned at runtime (not source)
+pm_[0-9]*/
+pm_registry.json
+KILL_SWITCH
+risk_audit.jsonl
+
+# Frontend build cache
+frontend/.vite/
+
+# AWS instance metadata cache
+setup/.aws_instance_info
+
+# TypeScript incremental build cache
+*.tsbuildinfo

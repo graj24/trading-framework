@@ -123,6 +123,7 @@ trading-framework/
 │   ├── README.md
 │   ├── user-guide.md           # OFFICIAL — install, configure, run, FAQ
 │   ├── technical-reference.md  # OFFICIAL — APIs, schemas, ops
+│   ├── pm-runtime-guide.md     # OFFICIAL — 24/7 event-driven PM runtime
 │   └── analysis/               # internal: architecture, issues, roadmap
 │
 ├── tests/                      # pytest suite (34 tests)
