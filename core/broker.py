@@ -9,6 +9,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import yfinance as yf
@@ -20,6 +21,56 @@ logger = logging.getLogger(__name__)
 BROKERAGE_PCT = BROKERAGE_FRAC   # alias kept for internal use
 BROKERAGE_MAX = 20.0              # ₹20 max per order
 STT_SELL_PCT  = STT_SELL_FRAC
+
+# ── Kill switch ───────────────────────────────────────────────────────────────
+KILL_SWITCH_PATH = Path("KILL_SWITCH")
+
+
+def is_kill_switch_active() -> bool:
+    return KILL_SWITCH_PATH.exists()
+
+
+def activate_kill_switch(reason: str = ""):
+    KILL_SWITCH_PATH.write_text(reason or "activated")
+    logger.critical(f"KILL SWITCH ACTIVATED: {reason}")
+
+
+def deactivate_kill_switch():
+    if KILL_SWITCH_PATH.exists():
+        KILL_SWITCH_PATH.unlink()
+    logger.info("Kill switch deactivated")
+
+
+# ── Global order rate limiter ─────────────────────────────────────────────────
+_GLOBAL_ORDER_TIMES: deque = deque()
+GLOBAL_MAX_ORDERS_PER_MIN = 30
+PM_MAX_ORDERS_PER_MIN = 10
+_PM_ORDER_TIMES: dict[str, deque] = {}
+
+
+def _check_global_rate_limit(pm_id: str = ""):
+    now = time.time()
+    # Global limit
+    while _GLOBAL_ORDER_TIMES and now - _GLOBAL_ORDER_TIMES[0] > 60:
+        _GLOBAL_ORDER_TIMES.popleft()
+    if len(_GLOBAL_ORDER_TIMES) >= GLOBAL_MAX_ORDERS_PER_MIN:
+        raise RuntimeError(
+            f"Global order rate limit hit: {GLOBAL_MAX_ORDERS_PER_MIN}/min"
+        )
+    _GLOBAL_ORDER_TIMES.append(now)
+
+    # Per-PM limit
+    if pm_id:
+        if pm_id not in _PM_ORDER_TIMES:
+            _PM_ORDER_TIMES[pm_id] = deque()
+        q = _PM_ORDER_TIMES[pm_id]
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= PM_MAX_ORDERS_PER_MIN:
+            raise RuntimeError(
+                f"PM{pm_id} order rate limit hit: {PM_MAX_ORDERS_PER_MIN}/min"
+            )
+        q.append(now)
 
 
 class Broker(ABC):
@@ -70,7 +121,12 @@ class PaperBroker(Broker):
         self._order_times.append(now)
 
     def place_order(self, symbol: str, qty: int, order_type: str = "MARKET",
-                    price: float = 0.0, sl: float = 0.0, tag: str = "") -> str:
+                    price: float = 0.0, sl: float = 0.0, tag: str = "",
+                    pm_id: str = "") -> str:
+        if is_kill_switch_active():
+            reason = KILL_SWITCH_PATH.read_text()
+            raise RuntimeError(f"Kill switch active — orders blocked. Reason: {reason}")
+        _check_global_rate_limit(pm_id)
         self._check_circuit_breaker()
         ltp = self.get_ltp(symbol)
         fill_price = price if (order_type == "LIMIT" and price > 0) else ltp
@@ -133,7 +189,12 @@ class ZerodhaBroker(Broker):
         logger.info("ZerodhaBroker initialized")
 
     def place_order(self, symbol: str, qty: int, order_type: str = "MARKET",
-                    price: float = 0.0, sl: float = 0.0, tag: str = "") -> str:
+                    price: float = 0.0, sl: float = 0.0, tag: str = "",
+                    pm_id: str = "") -> str:
+        if is_kill_switch_active():
+            reason = KILL_SWITCH_PATH.read_text()
+            raise RuntimeError(f"Kill switch active — orders blocked. Reason: {reason}")
+        _check_global_rate_limit(pm_id)
         from kiteconnect import KiteConnect
         params = {
             "tradingsymbol": symbol,

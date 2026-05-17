@@ -4,6 +4,7 @@ import clsx from "clsx";
 const NAV = [
   { to: "/", label: "TERMINAL", icon: "⬛" },
   { to: "/pipeline", label: "PIPELINE", icon: "◈" },
+  { to: "/pms", label: "PMS", icon: "◎" },
   { to: "/backtest", label: "BACKTEST", icon: "◷" },
   { to: "/replay", label: "REPLAY", icon: "↺" },
   { to: "/setup", label: "SETUP", icon: "⚙" },

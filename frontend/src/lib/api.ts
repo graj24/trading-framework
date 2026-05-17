@@ -38,6 +38,27 @@ export const api = {
   testService: (service: string) =>
     req<{ status: string; error?: string }>(`/api/env/test/${service}`, { method: "POST" }),
   infra: () => req<InfraStatus>("/api/infra"),
+  pms: () => req<PMSummary[]>("/api/pms"),
+  pmState: (id: string) => req<PMState>(`/api/pms/${id}/state`),
+  pmAudit: (id: string) => req<AuditEntry[]>(`/api/pms/${id}/audit`),
+  pmTriageLog: (id: string) => req<TriageDecision[]>(`/api/pms/${id}/triage_log`),
+  pmTrades: (id: string) => req<Trade[]>(`/api/pms/${id}/trades`),
+  pmEvents: (sinceId: number, pmId?: string) => {
+    const q = new URLSearchParams({ since_id: String(sinceId) });
+    if (pmId) q.set("pm_id", pmId);
+    return req<PMEvent[]>(`/api/pms/events?${q}`);
+  },
+  killSwitchStatus: () => req<{ active: boolean; reason: string }>("/api/pms/kill_switch"),
+  killSwitchOn: (reason?: string) =>
+    req<{ active: boolean }>(`/api/pms/kill_switch/activate?reason=${encodeURIComponent(reason ?? "manual via UI")}`, { method: "POST" }),
+  killSwitchOff: () =>
+    req<{ active: boolean }>("/api/pms/kill_switch/deactivate", { method: "POST" }),
+  pmPause: (id: string, reason?: string) =>
+    req<{ paused: boolean }>(`/api/pms/${id}/pause?reason=${encodeURIComponent(reason ?? "manual via UI")}`, { method: "POST" }),
+  pmResume: (id: string) =>
+    req<{ paused: boolean }>(`/api/pms/${id}/resume`, { method: "POST" }),
+  pmPausedStatus: (id: string) =>
+    req<{ paused: boolean; reason: string }>(`/api/pms/${id}/paused`),
 };
 
 // Types
@@ -109,6 +130,54 @@ export interface Candle {
   low: number;
   close: number;
   volume: number;
+}
+
+// ── PM types ──────────────────────────────────────────────────────────────────
+
+export interface PMSummary {
+  pm_id: string;
+  active: boolean;
+  daily_pnl_inr: number;
+  open_positions: number;
+  inbox_count: number;
+  last_wakeup: string | null;
+  capital: number;
+  daemons: Record<string, { ts: string; event: string }>;
+}
+
+export interface PMState {
+  pm_id: string;
+  plan: string;
+  tasks: Record<string, unknown[]>;
+  journal: string;
+  journal_summary: string;
+  inbox: unknown[];
+  positions: unknown[];
+  proposals: unknown[];
+  team: Record<string, unknown>;
+}
+
+export interface PMEvent {
+  id: number;
+  topic: string;
+  payload: Record<string, unknown>;
+  pm_id: string | null;
+  severity: string;
+  ts: string;
+}
+
+export interface AuditEntry {
+  ts: string;
+  pm_id: string;
+  event: string;
+  [key: string]: unknown;
+}
+
+export interface TriageDecision {
+  ts: string;
+  topic: string;
+  symbol: string;
+  classification: string;
 }
 
 // Streaming backtest helper

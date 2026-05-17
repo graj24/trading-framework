@@ -9,10 +9,12 @@ Schedule (IST):
   Every 5 min (09:15-15:00) - Monitor positions + news
   15:00 - Close all positions
   15:30 - Daily report + learning update
+  PM heartbeats: 08:30, 09:15, 11:00, 12:30, 14:00, 15:30 (all active PMs)
 """
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -23,6 +25,67 @@ logger = logging.getLogger(__name__)
 
 def _load_config() -> dict:
     return get_config()
+
+
+# ── Multica heartbeat ─────────────────────────────────────────────────────────
+
+def _multica_wakeup(pm_id: str, shift: str):
+    """POST a wakeup issue to Multica for the given PM."""
+    import requests
+    from core.pm_state import build_wakeup_context
+
+    server = os.getenv("MULTICA_SERVER_URL", "http://13.232.42.85:8080")
+    token = os.getenv("MULTICA_TOKEN", "")
+    if not token:
+        logger.warning("MULTICA_TOKEN not set — skipping PM wakeup via Multica")
+        # Still publish to event bus so daemons can react
+        try:
+            from core.event_bus import get_bus
+            get_bus().publish(
+                f"pm.wakeup.{pm_id}",
+                {"trigger": "heartbeat", "shift": shift},
+                pm_id=pm_id,
+                severity="INFO",
+            )
+        except Exception:
+            pass
+        return
+
+    context = build_wakeup_context(pm_id, shift=shift)
+    payload = {
+        "title": f"[{shift}] PM{pm_id} shift check",
+        "body": context,
+        "assignee": f"PM{pm_id}",
+        "labels": ["heartbeat", shift.lower().replace(":", "")],
+    }
+    try:
+        resp = requests.post(
+            f"{server}/api/issues",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            logger.info(f"PM{pm_id} wakeup issued via Multica [{shift}]")
+        else:
+            logger.warning(f"Multica wakeup failed: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"Multica wakeup error: {e}")
+
+
+def job_pm_heartbeat(shift: str):
+    """Wake all active PMs for a scheduled shift."""
+    try:
+        from core.pm_runtime import list_pms
+        from pathlib import Path as _Path
+        for pm in list_pms(active_only=True):
+            pm_id = pm["pm_id"]
+            if _Path(f"pm_{pm_id}/state/PAUSED").exists():
+                logger.info(f"PM{pm_id} paused — skipping heartbeat [{shift}]")
+                continue
+            _multica_wakeup(pm_id, shift)
+    except Exception as e:
+        logger.error(f"PM heartbeat [{shift}] failed: {e}")
 
 
 # ── Job functions ─────────────────────────────────────────────────────────────
@@ -71,6 +134,10 @@ def job_earnings_overnight():
 def job_preopen_scan():
     logger.info("⚡ [09:00] Pre-open scan...")
     try:
+        from core.holidays import is_trading_day
+        if not is_trading_day(datetime.now().date()):
+            logger.info("  Market closed today — skipping pre-open scan")
+            return
         from agents.pre_open_monitor import PreOpenMonitor
         from agents.earnings_calendar_agent import EarningsCalendarAgent
         from core.alerts import TelegramAlerter
@@ -113,6 +180,10 @@ def job_discover_stocks():
 def job_pre_market_analysis():
     logger.info("🔍 [08:30] Pre-market analysis...")
     try:
+        from core.holidays import is_trading_day
+        if not is_trading_day(datetime.now().date()):
+            logger.info("  Market closed today — skipping pre-market analysis")
+            return
         from agents.technical_agent import TechnicalAgent
         from agents.regime_agent import RegimeAgent
         config = _load_config()
@@ -128,6 +199,10 @@ def job_pre_market_analysis():
 def job_execute_trades():
     logger.info("⚡ [09:15] Executing paper trades...")
     try:
+        from core.holidays import is_trading_day
+        if not is_trading_day(datetime.now().date()):
+            logger.info("  Market closed today — skipping trade execution")
+            return
         import sqlite3 as _sqlite3
         from pathlib import Path as _Path
         from agents.master import MasterAgent
@@ -198,6 +273,20 @@ def job_intraday_scan():
         for r in result.get("buy_signals", []):
             p = r["best_pattern"]
             logger.info(f"  🟢 INTRADAY: {r['symbol']} — {p['description']}")
+            # Publish to event bus for PM daemons
+            try:
+                from core.event_bus import get_bus
+                from core.pm_runtime import list_pms
+                get_bus().publish(
+                    f"price.spike.{r['symbol']}",
+                    {"symbol": r["symbol"], "ltp": r["ltp"], "pct": r.get("pct", 0),
+                     "pattern": p["pattern"], "confidence": p["confidence"],
+                     "entry": r.get("entry", r["ltp"]), "sl": p.get("stop_loss"),
+                     "target": p.get("target"), "description": p["description"]},
+                    severity="HIGH",
+                )
+            except Exception as _e:
+                logger.debug(f"Event bus publish failed: {_e}")
             # Execute paper trade
             executor.execute_trade(
                 symbol=r["symbol"],
@@ -235,6 +324,19 @@ def job_monitor_positions():
         for trade in closed:
             alerter.exit_alert(trade["symbol"], trade["outcome"],
                                trade["pnl_pct"], trade["pnl_inr"])
+            # Publish fill/exit event to bus
+            try:
+                from core.event_bus import get_bus
+                pm_id = trade.get("pm_id", "")
+                get_bus().publish(
+                    f"fill.{pm_id}" if pm_id else "fill.system",
+                    {"symbol": trade["symbol"], "outcome": trade["outcome"],
+                     "pnl_inr": trade.get("pnl_inr", 0), "pnl_pct": trade.get("pnl_pct", 0)},
+                    pm_id=pm_id or None,
+                    severity="INFO",
+                )
+            except Exception as _e:
+                logger.debug(f"Event bus publish failed: {_e}")
 
         # Only check news for currently open positions, not entire watchlist
         open_symbols: list[str] = []
@@ -248,6 +350,16 @@ def job_monitor_positions():
         if open_symbols:
             alerts = news_agent.monitor_open_positions(open_symbols)
             for symbol, tier in alerts.items():
+                # Publish news event to bus for PM daemons
+                try:
+                    from core.event_bus import get_bus
+                    get_bus().publish(
+                        f"news.{symbol}",
+                        {"symbol": symbol, "tier": tier, "source": "news_monitor"},
+                        severity="CRITICAL" if tier == 1 else "HIGH",
+                    )
+                except Exception as _e:
+                    logger.debug(f"Event bus publish failed: {_e}")
                 if tier == 1:
                     result = executor.emergency_exit(symbol, "TIER 1 news")
                     if result:
@@ -398,7 +510,15 @@ def start():
     # Overnight earnings monitor every 30 min from 6 PM to 8 AM
     scheduler.add_job(job_earnings_overnight, CronTrigger(hour="18-23,0-8", minute="0,30"))
 
-    logger.info("Scheduler started. Press Ctrl+C to stop.")
+    # PM heartbeat shifts (IST) — wake all active PMs at each shift
+    for shift_label, h, m in [("08:30",8,30),("09:15",9,15),("11:00",11,0),
+                               ("12:30",12,30),("14:00",14,0),("15:30",15,30)]:
+        scheduler.add_job(
+            job_pm_heartbeat, CronTrigger(hour=h, minute=m),
+            args=[shift_label], id=f"pm_hb_{shift_label.replace(':','')}",
+        )
+
+    logger.info("Scheduler started (with PM heartbeats). Press Ctrl+C to stop.")
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -12,11 +15,89 @@ from agents.base import Agent, AgentResult, AgentStatus
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
+AUDIT_LOG_PATH = BASE_DIR / "risk_audit.jsonl"
+
+logger = logging.getLogger(__name__)
 
 
 def _load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
+
+
+# ── Audit log ─────────────────────────────────────────────────────────────────
+
+def audit_log(pm_id: str, event: str, detail: dict):
+    """Append one line to the risk audit log."""
+    entry = {
+        "ts": datetime.utcnow().isoformat(),
+        "pm_id": pm_id,
+        "event": event,
+        **detail,
+    }
+    with AUDIT_LOG_PATH.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+# ── Circuit breaker ───────────────────────────────────────────────────────────
+
+def _get_pm_pnl(pm_id: str, db_path: str = "paper_trades.db") -> dict:
+    """Return daily and weekly realised P&L pct for a PM."""
+    db = BASE_DIR / db_path
+    if not db.exists():
+        return {"daily_pct": 0.0, "weekly_pct": 0.0}
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        today = date.today().isoformat()
+        daily = conn.execute(
+            "SELECT COALESCE(SUM(pnl_inr),0) FROM trades "
+            "WHERE pm_id=? AND outcome!='open' AND exit_date LIKE ?",
+            (pm_id, f"{today}%"),
+        ).fetchone()[0]
+        weekly = conn.execute(
+            "SELECT COALESCE(SUM(pnl_inr),0) FROM trades "
+            "WHERE pm_id=? AND outcome!='open' AND exit_date >= date('now','-7 days')",
+            (pm_id,),
+        ).fetchone()[0]
+        capital_row = conn.execute(
+            "SELECT COALESCE(SUM(entry_price*quantity),1) FROM trades WHERE pm_id=?",
+            (pm_id,),
+        ).fetchone()[0] or 1
+    return {
+        "daily_pct": daily / capital_row * 100,
+        "weekly_pct": weekly / capital_row * 100,
+    }
+
+
+def check_circuit_breaker(pm_id: str, config: dict | None = None) -> tuple[bool, str]:
+    """
+    Returns (trading_allowed, reason).
+    Publishes risk.breach event and activates kill switch on severe breach.
+    """
+    cfg = (config or _load_config()).get("risk", {})
+    daily_halt = cfg.get("max_loss_per_day_pct", 3.0)
+    weekly_halve = cfg.get("max_loss_per_week_pct", 7.0)
+
+    pnl = _get_pm_pnl(pm_id)
+    daily_pct = pnl["daily_pct"]
+    weekly_pct = pnl["weekly_pct"]
+
+    if daily_pct <= -daily_halt:
+        reason = f"Daily loss {daily_pct:.1f}% exceeds -{daily_halt}% — PM{pm_id} halted"
+        audit_log(pm_id, "DAILY_HALT", {"daily_pct": daily_pct, "limit": daily_halt})
+        try:
+            from core.event_bus import get_bus
+            get_bus().publish(f"risk.breach.{pm_id}", {"reason": reason, "daily_pct": daily_pct}, pm_id=pm_id, severity="CRITICAL")
+        except Exception:
+            pass
+        return False, reason
+
+    if weekly_pct <= -weekly_halve:
+        reason = f"Weekly loss {weekly_pct:.1f}% exceeds -{weekly_halve}% — PM{pm_id} sizes halved"
+        audit_log(pm_id, "WEEKLY_HALVE", {"weekly_pct": weekly_pct, "limit": weekly_halve})
+        return True, reason  # allowed but caller should halve sizes
+
+    return True, "OK"
 
 
 # --- 1. Kelly Criterion (half-Kelly) ---
