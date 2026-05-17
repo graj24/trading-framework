@@ -55,8 +55,8 @@ export function Infra() {
 
   if (error || !data)
     return (
-      <div className="p-6 text-red-400 text-sm">
-        Failed to load infra status. Is the API running?
+      <div className="p-6 text-red-400 text-sm font-mono">
+        Error: {error instanceof Error ? error.message : "Failed to load infra status"}
       </div>
     );
 
