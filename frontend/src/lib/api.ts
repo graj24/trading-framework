@@ -37,6 +37,7 @@ export const api = {
     }),
   testService: (service: string) =>
     req<{ status: string; error?: string }>(`/api/env/test/${service}`, { method: "POST" }),
+  infra: () => req<InfraStatus>("/api/infra"),
 };
 
 // Types
@@ -85,6 +86,20 @@ export interface LtpData {
   symbol: string;
   price?: number;
   change_pct?: number;
+}
+
+export interface InfraStatus {
+  timestamp: string;
+  instance: { id: string; type: string; public_ip: string; region: string };
+  system: {
+    uptime: string;
+    load: string[];
+    disk: { total: string; used: string; free: string; pct: string };
+    memory: { total_mb: number; used_mb: number; free_mb: number };
+  };
+  services: Record<string, string>;
+  multica: { status: string; agents: string; workspaces: string };
+  deploy: { branch: string; commit: string };
 }
 
 export interface Candle {

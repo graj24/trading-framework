@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from api.routers import trades, signals, market, config, backtest, agents, ws, candles
+from api.routers import trades, signals, market, config, backtest, agents, ws, candles, infra
 
 app = FastAPI(
     title="Bloomberg Terminal API",
@@ -42,6 +42,7 @@ app.include_router(backtest.router)
 app.include_router(agents.router)
 app.include_router(ws.router)
 app.include_router(candles.router)
+app.include_router(infra.router)
 
 
 @app.get("/api/health")

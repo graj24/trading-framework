@@ -7,6 +7,7 @@ const NAV = [
   { to: "/backtest", label: "BACKTEST", icon: "◷" },
   { to: "/replay", label: "REPLAY", icon: "↺" },
   { to: "/setup", label: "SETUP", icon: "⚙" },
+  { to: "/infra", label: "INFRA", icon: "⬡" },
 ];
 
 export function Sidebar() {
