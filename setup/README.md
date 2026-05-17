@@ -1,56 +1,57 @@
-# AWS Hosting — Trading Framework
+# Infrastructure & Operations Guide
 
-## What's running where
+## Architecture overview
 
 ```
-Your Mac  ──────────────────────────────────────────────────────────
-  ~/.ssh/trading-key.pem   (SSH key to access the server)
-  setup/deploy.sh          (script to push code updates)
+You (CEO)
+    │
+    ▼
+Multica Board  http://13.232.42.85:3000
+    │  assign tasks to PM agents
+    ▼
+Trading EC2 (13.206.3.62)  ← Multica daemon runs here
+    ├── PM1 agent  (kiro-cli, executes in /app)
+    ├── PM2 agent  (kiro-cli, executes in /app)
+    ├── trading-daemon   → python main.py --schedule (24/7)
+    ├── trading-api      → uvicorn api.main:app (port 8000)
+    └── nginx            → port 80 → port 8000
 
-AWS (ap-south-1 / Mumbai)  ─────────────────────────────────────────
-  EC2: m7i-flex.large  (2 vCPU, 8GB RAM)
-  Elastic IP: 13.206.3.62  (fixed — won't change on reboot)
-  EBS: 20GB gp3  (all code, data, SQLite live here)
-  Security group: port 22 (SSH) + port 80 (HTTP) open
+Multica EC2 (13.232.42.85)
+    ├── multica-frontend  (port 3000)
+    ├── multica-backend   (port 8080)
+    └── multica-postgres  (port 5432)
 ```
 
-## What runs on the server
+---
 
-Three systemd services, all auto-start on reboot:
+## EC2 instances
 
-| Service | What it does | Command |
-|---|---|---|
-| `trading-api` | FastAPI backend + serves React UI on port 8000 | `uvicorn api.main:app` |
-| `trading-daemon` | 24/7 trading scheduler (IST market hours) | `python main.py --schedule` |
-| `nginx` | Reverse proxy — forwards port 80 → port 8000 | — |
+| Instance | IP | Type | Purpose |
+|---|---|---|---|
+| trading-framework | 13.206.3.62 | m7i-flex.large (8GB) | Trading daemon + API + PM agents |
+| multica-server | 13.232.42.85 | t3.small (2GB) | Multica management platform |
 
-## Access
+SSH key for both: `~/.ssh/trading-key.pem`
 
-| | |
+```bash
+ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62   # trading EC2
+ssh -i ~/.ssh/trading-key.pem ec2-user@13.232.42.85  # multica EC2
+```
+
+---
+
+## Access URLs
+
+| Service | URL |
 |---|---|
-| App (React UI) | http://13.206.3.62 |
+| Trading dashboard (React UI) | http://13.206.3.62 |
 | API docs (Swagger) | http://13.206.3.62/docs |
-| SSH into server | `ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62` |
+| Multica board | http://13.232.42.85:3000 |
+| Multica API | http://13.232.42.85:8080 |
 
-## File layout on server
-
-```
-/app/                        ← all project files live here
-├── .env                     ← secrets (GROQ_API_KEY etc.) — never in git
-├── config.yaml              ← trading config (watchlist, risk, schedule)
-├── paper_trades.db          ← SQLite trade ledger
-├── stocks/                  ← per-stock knowledge bases (built by DataAgent)
-├── models/stocks_1h/        ← 1h candle data + trained ML model
-├── logs/
-│   ├── daemon.log           ← trading scheduler logs
-│   ├── api.log              ← FastAPI logs
-│   └── trading.log          ← main pipeline logs
-└── frontend/dist/           ← built React app (served by FastAPI)
-```
+---
 
 ## Makefile tasks (run from repo root)
-
-All common tasks are available via `make`. No need to remember commands.
 
 ### Local development
 | Command | What it does |
@@ -65,7 +66,7 @@ All common tasks are available via `make`. No need to remember commands.
 | Command | What it does |
 |---|---|
 | `make deploy` | Push latest code to EC2 + restart services |
-| `make ssh` | SSH into EC2 |
+| `make ssh` | SSH into trading EC2 |
 | `make logs` | Tail live daemon logs on EC2 |
 | `make status` | Check health of all 3 services on EC2 |
 | `make restart` | Restart trading-api and trading-daemon on EC2 |
@@ -80,52 +81,101 @@ make update-key KEY=GROQ_API_KEY VALUE=your_new_key_here
 
 ## Day-to-day operations
 
-### Push a code update from your Mac
+### Push a code update
 ```bash
-bash setup/deploy.sh 13.206.3.62 ~/.ssh/trading-key.pem
+git push origin main   # triggers auto-deploy via GitHub Actions
+# or manually:
+make deploy
 ```
-This rsyncs code (skipping `.env`, `stocks/`, `paper_trades.db`), rebuilds the frontend, and restarts services.
 
 ### Check if services are healthy
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
-sudo systemctl status trading-api trading-daemon nginx
+make status
 ```
 
 ### View live logs
 ```bash
-# Trading scheduler
-tail -f /app/logs/daemon.log
-
-# FastAPI
-tail -f /app/logs/api.log
-
-# Or via journalctl
-sudo journalctl -u trading-daemon -f
-sudo journalctl -u trading-api -f
+make logs                                          # trading daemon
+ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62 "tail -f /app/logs/api.log"
 ```
 
-### Restart a service
+### Restart services
 ```bash
-sudo systemctl restart trading-api
+make restart
+```
+
+### Edit secrets / config on EC2
+```bash
+make ssh
+nano /app/.env          # API keys
+nano /app/config.yaml   # watchlist, capital, risk settings
 sudo systemctl restart trading-daemon
 ```
 
-### Edit secrets / config
+---
+
+## Portfolio Manager agents
+
+PM agents are managed via Multica at **http://13.232.42.85:3000**.
+
+| Agent | Prompt file | Strategy |
+|---|---|---|
+| PM1 | `pm_prompts/PM1_full_prompt.md` | Multi-signal pipeline (inherited from human PM) |
+| PM2 | `pm_prompts/PM2_full_prompt.md` | Competes against PM1 |
+
+### As CEO — how to manage PMs
+- **Assign a task**: create an issue on the Multica board, assign to PM1 or PM2
+- **Pause a PM**: stop its trading daemon service on EC2
+- **Check P&L scoreboard**:
 ```bash
-nano /app/.env          # API keys
-nano /app/config.yaml   # watchlist, capital, risk settings
-sudo systemctl restart trading-daemon  # pick up config changes
+sqlite3 /app/paper_trades.db "
+SELECT pm_id, COUNT(*) trades, SUM(pnl_inr) total_pnl
+FROM trades WHERE outcome != 'open'
+GROUP BY pm_id ORDER BY total_pnl DESC;
+"
 ```
 
-## First-time data setup (already done if stocks/ exists)
+### Adding a new PM
+1. Create `pm_prompts/PM<N>.md` with competitive context
+2. Run `cat pm_prompts/TEMPLATE.md pm_prompts/PM<N>.md > pm_prompts/PM<N>_full_prompt.md`
+3. In Multica: Settings → Agents → New Agent → paste the full prompt
+4. Create `pm<N>/main.py` and `pm<N>/config.yaml` on EC2
 
-If you ever need to rebuild stock data from scratch:
+### Multica daemon (on trading EC2)
+The Multica daemon runs in the background and connects the trading EC2 to the Multica server:
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+multica daemon status   # check
+multica daemon start    # start
+multica daemon stop     # stop
+```
+Agent CLIs available: `kiro`, `claude`
+
+---
+
+## Multica server operations (on multica EC2)
+
+```bash
+ssh -i ~/.ssh/trading-key.pem ec2-user@13.232.42.85
+
+# Check containers
+docker ps
+
+# Restart Multica
+cd ~ && docker compose -f docker-compose.selfhost.yml --env-file .env restart
+
+# View logs
+docker logs multica-backend-1 -f
+```
+
+---
+
+## First-time data setup (if stocks/ is missing)
+
+```bash
+make ssh
 cd /app && source .venv/bin/activate
 
-# Build knowledge bases (~15 min for full watchlist)
+# Build knowledge bases (~15 min)
 python -c "
 import yaml; from agents.data_agent import DataAgent
 cfg = yaml.safe_load(open('config.yaml'))
@@ -139,21 +189,31 @@ python models/india_intraday_model.py fetch
 python models/india_intraday_model.py train
 ```
 
+---
+
 ## Cost
 
-~$70/month (m7i-flex.large on-demand in ap-south-1).  
-Free tier eligible — covered by AWS credits.
+| Resource | Monthly cost |
+|---|---|
+| Trading EC2 (m7i-flex.large) | ~$70 |
+| Multica EC2 (t3.small) | ~$15 |
+| EBS volumes (2 × 20GB gp3) | ~$3 |
+| Elastic IPs (2) | Free (attached) |
+| **Total** | **~$88/month** |
 
-To stop billing if you want to pause: stop (not terminate) the instance from AWS Console.  
-The Elastic IP costs ~$3.60/month while the instance is stopped.
+Covered by AWS credits. Monitor at https://console.aws.amazon.com/billing/home#/credits
 
-## AWS resource IDs (for reference)
+---
+
+## AWS resource IDs
 
 ```
-Instance ID  : i-0ff6ea4482b95d3f6
-Elastic IP   : 13.206.3.62
-Alloc ID     : eipalloc-0adf311090a7cf7e4
-Security Group: sg-025a71fd666c80cb8
-Region       : ap-south-1
-SSH key      : ~/.ssh/trading-key.pem
+Trading EC2:   i-0ff6ea4482b95d3f6  (13.206.3.62)
+Multica EC2:   i-011ce82a396c7bbe0  (13.232.42.85)
+Trading EIP:   eipalloc-0adf311090a7cf7e4
+Multica EIP:   eipalloc-055baded4671a7c80
+Trading SG:    sg-025a71fd666c80cb8
+Multica SG:    sg-074db92f6c94ff4e5
+Region:        ap-south-1
+SSH key:       ~/.ssh/trading-key.pem
 ```
