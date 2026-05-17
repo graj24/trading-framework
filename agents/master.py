@@ -267,7 +267,7 @@ class MasterAgent(Agent):
 
         # ML signal (daily global model)
         try:
-            from ml_model import predict as ml_predict
+            from models.ml_model import predict as ml_predict
             ml = ml_predict(symbol)
             scores["ml_proba"]  = ml["ml_proba"]
             scores["ml_signal"] = ml["ml_signal"]
@@ -279,7 +279,7 @@ class MasterAgent(Agent):
 
         # India intraday model (1h, NSE-specific)
         try:
-            from india_intraday_model import predict as intraday_predict, dynamic_threshold
+            from models.india_intraday_model import predict as intraday_predict, dynamic_threshold
             intra = intraday_predict(symbol)
 
             # Compute dynamic threshold from current conditions
@@ -292,7 +292,7 @@ class MasterAgent(Agent):
             except Exception:
                 pass
 
-            from india_intraday_model import _fo_expiry_days
+            from models.india_intraday_model import _fo_expiry_days
             import pandas as _pd
             fo_days = int(_fo_expiry_days(_pd.DatetimeIndex([_pd.Timestamp.now()])).iloc[0])
             dyn_thresh = dynamic_threshold(

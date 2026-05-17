@@ -27,7 +27,28 @@ class AgentResult:
 
 
 class Agent(ABC):
-    """Abstract base for all trading agents."""
+    """Abstract base for all trading agents.
+
+    B.3 / C6: every concrete subclass automatically gets per-agent timing
+    via the `core.timing.timed_run` decorator wrapped around its `run`
+    method. This is opt-out (set `_TIMED_RUN = False` on a subclass to
+    skip), but every agent in this repo benefits by default.
+    """
+
+    _TIMED_RUN: bool = True
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # Only wrap if the subclass actually defines `run` itself, AND it
+        # hasn't already been wrapped (idempotent so re-importing or
+        # multiple-inheritance doesn't double-wrap).
+        if "run" in cls.__dict__ and getattr(cls, "_TIMED_RUN", True):
+            from core.timing import timed_run
+            run_method = cls.__dict__["run"]
+            if not getattr(run_method, "_timed", False):
+                wrapped = timed_run(run_method)
+                wrapped._timed = True  # type: ignore[attr-defined]
+                cls.run = wrapped
 
     def __init__(self, name: str, config: dict):
         self.name = name

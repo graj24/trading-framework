@@ -170,17 +170,181 @@ class ZerodhaBroker(Broker):
 
 
 def get_broker(config: dict) -> Broker:
-    """Factory: returns PaperBroker or ZerodhaBroker based on config."""
-    mode = config["trading"]["mode"]
+    """Factory: returns the right Broker based on config.trading.mode/broker."""
+    mode   = config["trading"]["mode"]
+    broker = config.get("trading", {}).get("broker", "").lower()
+
     if mode == "paper":
         return PaperBroker()
+    elif mode == "shadow":
+        return ShadowBroker()
     elif mode == "live":
+        if not broker:
+            raise ValueError(
+                "config.trading.broker must be set when mode=live. "
+                "Valid values: zerodha, upstox, angelone."
+            )
         import os
-        return ZerodhaBroker(
-            api_key=os.getenv("ZERODHA_API_KEY", ""),
-            access_token=os.getenv("ZERODHA_ACCESS_TOKEN", ""),
-        )
+        if broker == "upstox":
+            return UpstoxBroker(
+                api_key=os.getenv("UPSTOX_API_KEY", ""),
+                access_token=os.getenv("UPSTOX_ACCESS_TOKEN", ""),
+            )
+        elif broker == "angelone":
+            return AngelOneBroker(
+                api_key=os.getenv("ANGELONE_API_KEY", ""),
+                client_id=os.getenv("ANGELONE_CLIENT_ID", ""),
+                password=os.getenv("ANGELONE_PASSWORD", ""),
+                totp_secret=os.getenv("ANGELONE_TOTP_SECRET", ""),
+            )
+        else:  # default: zerodha
+            return ZerodhaBroker(
+                api_key=os.getenv("ZERODHA_API_KEY", ""),
+                access_token=os.getenv("ZERODHA_ACCESS_TOKEN", ""),
+            )
     raise ValueError(f"Unknown trading mode: {mode}")
+
+
+# ── P3: Multi-broker stubs ────────────────────────────────────────────────────
+
+class UpstoxBroker(Broker):
+    """Upstox API v2 stub.
+
+    Plug in real implementation once ``upstox-python-sdk`` is installed and
+    credentials are available.  Set ``trading.broker: upstox`` in config.yaml.
+    """
+
+    def __init__(self, api_key: str, access_token: str):
+        self.api_key      = api_key
+        self.access_token = access_token
+        logger.info("UpstoxBroker initialised (stub — no live calls)")
+
+    def place_order(self, symbol: str, qty: int, order_type: str = "MARKET",
+                    price: float = 0.0, sl: float = 0.0, tag: str = "") -> str:
+        raise NotImplementedError(
+            "UpstoxBroker.place_order: install upstox-python-sdk and implement this method. "
+            "See https://upstox.com/developer/api-documentation/"
+        )
+
+    def cancel_order(self, order_id: str) -> bool:
+        raise NotImplementedError("UpstoxBroker.cancel_order not implemented")
+
+    def get_positions(self) -> list[dict]:
+        raise NotImplementedError("UpstoxBroker.get_positions not implemented")
+
+    def get_order_status(self, order_id: str) -> dict:
+        raise NotImplementedError("UpstoxBroker.get_order_status not implemented")
+
+    def get_ltp(self, symbol: str) -> float:
+        raise NotImplementedError("UpstoxBroker.get_ltp not implemented")
+
+
+class AngelOneBroker(Broker):
+    """Angel One SmartAPI stub.
+
+    Plug in real implementation once ``smartapi-python`` is installed and
+    credentials are available.  Set ``trading.broker: angelone`` in config.yaml.
+    """
+
+    def __init__(self, api_key: str, client_id: str,
+                 password: str, totp_secret: str):
+        self.api_key     = api_key
+        self.client_id   = client_id
+        self.password    = password
+        self.totp_secret = totp_secret
+        logger.info("AngelOneBroker initialised (stub — no live calls)")
+
+    def place_order(self, symbol: str, qty: int, order_type: str = "MARKET",
+                    price: float = 0.0, sl: float = 0.0, tag: str = "") -> str:
+        raise NotImplementedError(
+            "AngelOneBroker.place_order: install smartapi-python and implement this method. "
+            "See https://smartapi.angelbroking.com/docs"
+        )
+
+    def cancel_order(self, order_id: str) -> bool:
+        raise NotImplementedError("AngelOneBroker.cancel_order not implemented")
+
+    def get_positions(self) -> list[dict]:
+        raise NotImplementedError("AngelOneBroker.get_positions not implemented")
+
+    def get_order_status(self, order_id: str) -> dict:
+        raise NotImplementedError("AngelOneBroker.get_order_status not implemented")
+
+    def get_ltp(self, symbol: str) -> float:
+        raise NotImplementedError("AngelOneBroker.get_ltp not implemented")
+
+
+class ShadowBroker(Broker):
+    """P2 §21 — Shadow mode.
+
+    Sends every order to *both* PaperBroker (always) and ZerodhaBroker (when
+    credentials are available).  Compares the fills and logs divergence.
+
+    If Zerodha credentials are missing the live leg is skipped silently —
+    the paper leg always succeeds, so the system keeps running.
+    """
+
+    def __init__(self):
+        self.paper = PaperBroker()
+        self._live: "ZerodhaBroker | None" = None
+        self._fill_log: list[dict] = []
+        import os
+        api_key      = os.getenv("ZERODHA_API_KEY", "")
+        access_token = os.getenv("ZERODHA_ACCESS_TOKEN", "")
+        if api_key and access_token:
+            try:
+                self._live = ZerodhaBroker(api_key=api_key, access_token=access_token)
+                logger.info("ShadowBroker: live leg (Zerodha) active")
+            except Exception as e:
+                logger.warning("ShadowBroker: live leg unavailable — %s", e)
+
+    def place_order(self, symbol: str, qty: int, order_type: str = "MARKET",
+                    price: float = 0.0, sl: float = 0.0, tag: str = "") -> str:
+        paper_id = self.paper.place_order(symbol, qty, order_type, price, sl, tag)
+        paper_fill = self.paper.get_order_status(paper_id).get("price", price)
+
+        live_id   = None
+        live_fill = None
+        if self._live:
+            try:
+                live_id   = self._live.place_order(symbol, qty, order_type, price, sl, tag)
+                live_fill = self._live.get_order_status(live_id).get("average_price", price)
+            except Exception as e:
+                logger.warning("ShadowBroker: live order failed for %s — %s", symbol, e)
+
+        entry = {
+            "symbol": symbol, "qty": qty,
+            "paper_id": paper_id, "paper_fill": paper_fill,
+            "live_id": live_id,   "live_fill": live_fill,
+        }
+        if live_fill is not None and paper_fill:
+            slippage_bps = abs(live_fill - paper_fill) / paper_fill * 10_000
+            entry["slippage_bps"] = round(slippage_bps, 2)
+            if slippage_bps > 10:
+                logger.warning(
+                    "ShadowBroker: fill divergence %s — paper=%.2f live=%.2f (%.1f bps)",
+                    symbol, paper_fill, live_fill, slippage_bps,
+                )
+        self._fill_log.append(entry)
+        if len(self._fill_log) > 1000:
+            self._fill_log = self._fill_log[-1000:]
+        return paper_id   # callers track the paper ID
+
+    def cancel_order(self, order_id: str) -> bool:
+        return self.paper.cancel_order(order_id)
+
+    def get_positions(self) -> list[dict]:
+        return self.paper.get_positions()
+
+    def get_order_status(self, order_id: str) -> dict:
+        return self.paper.get_order_status(order_id)
+
+    def get_ltp(self, symbol: str) -> float:
+        return self.paper.get_ltp(symbol)
+
+    def fill_comparison(self) -> list[dict]:
+        """Return the fill log for analysis."""
+        return list(self._fill_log)
 
 
 if __name__ == "__main__":

@@ -309,20 +309,20 @@ class DiscoveryAgent(Agent):
         }
 
     def _add_to_watchlist(self, symbols: list[str]) -> list[str]:
-        """Append new symbols to config.yaml watchlist."""
+        """Append new symbols to the dynamic watchlist file (LOW-10).
+
+        Was previously rewriting ``config.yaml`` and losing comments.
+        Now writes to ``data/dynamic_watchlist.json`` instead — config.yaml
+        is treated as read-only.
+        """
         try:
-            with open(self.config_path) as f:
-                config = yaml.safe_load(f)
-            existing = set(config.get("watchlist", []))
-            new = [s for s in symbols if s not in existing]
+            from core.watchlist import add_to_dynamic_watchlist
+            new = add_to_dynamic_watchlist(symbols)
             if new:
-                config["watchlist"] = list(existing) + new
-                with open(self.config_path, "w") as f:
-                    yaml.dump(config, f, default_flow_style=False, allow_unicode=True)
-                logger.info(f"Added to watchlist: {new}")
+                logger.info(f"Added to dynamic watchlist: {new}")
             return new
         except Exception as e:
-            logger.error(f"Failed to update watchlist: {e}")
+            logger.error(f"Failed to update dynamic watchlist: {e}")
             return []
 
 

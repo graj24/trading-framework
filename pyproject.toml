@@ -1,8 +1,26 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "trading-framework"
 version = "0.1.0"
+description = "Autonomous Trading Framework — agent-orchestrated equity trading for the Indian (NSE) market."
 requires-python = ">=3.10"
+readme = "README.md"
+
+# Runtime dependencies are still pinned in requirements.txt for now.
+# When this project graduates to a published package, mirror them here.
+dependencies = []
+
+[project.optional-dependencies]
+# `pip install -e .[live]` enables the Zerodha broker.
+live = ["kiteconnect>=5.0.1"]
+# Streamlit dashboard.
+dashboard = ["streamlit>=1.36", "plotly>=5.22"]
+# Test runner.
+test = ["pytest>=8.0"]
+
+[tool.setuptools]
+packages = ["agents", "core", "ripple", "api", "models", "scripts"]
+py-modules = ["main"]

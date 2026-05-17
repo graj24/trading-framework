@@ -1,417 +1,411 @@
-"""
-Event-driven backtesting engine.
+"""core/backtester.py — unified event-driven backtester.
 
-Usage:
-  python -m core.backtester --stock RELIANCE --strategy rsi
+Strategies
+----------
+GapStrategy        : daily OHLC gap-up trades (replaces backtest_gap.py)
+IntradayMLStrategy : 1h ML-signal trades     (replaces backtest_intraday.py)
+
+CLI
+---
+python -m core.backtester --strategy gap [--threshold 2.0] [--symbols RELIANCE TCS]
+python -m core.backtester --strategy ml_intraday [--threshold 0.55] [--symbols ...]
 """
 from __future__ import annotations
 
 import argparse
-import logging
+import pickle
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum
-from typing import Optional
+from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import pandas as pd
 
+warnings.filterwarnings("ignore")
+
+from core.costs import SLIPPAGE_FRAC as SLIPPAGE, BROKERAGE_FRAC as BROKERAGE
 from core.knowledge_base import kb_path
 
-logger = logging.getLogger(__name__)
-
-SLIPPAGE = 0.0005   # 0.05%
-BROKERAGE = 0.0003  # 0.03% per side
+CAPITAL      = 10_000
+POSITION_PCT = 0.15
 
 
-class SignalType(Enum):
-    BUY = "BUY"
-    SELL = "SELL"
-    HOLD = "HOLD"
-
-
-@dataclass
-class Signal:
-    type: SignalType
-    price: float
-    stop_loss: float
-    target: float
-    confidence: float = 1.0
-    reason: str = ""
-
+# ── Trade record ──────────────────────────────────────────────────────────────
 
 @dataclass
 class Trade:
-    symbol: str
-    entry_date: datetime
-    entry_price: float
-    stop_loss: float
-    target: float
-    exit_date: Optional[datetime] = None
-    exit_price: Optional[float] = None
-    pnl_pct: Optional[float] = None
-    outcome: str = "open"  # win | loss | timeout
+    symbol:      str
+    entry_dt:    pd.Timestamp
+    exit_dt:     pd.Timestamp
+    entry:       float
+    exit:        float
+    qty:         int
+    exit_reason: str
+    strategy:    str
+
+    @property
+    def pnl_inr(self) -> float:
+        brok = (self.entry + self.exit) * self.qty * BROKERAGE
+        return (self.exit - self.entry) * self.qty - brok
+
+    @property
+    def pnl_pct(self) -> float:
+        return (self.exit - self.entry) / self.entry * 100
+
+    @property
+    def win(self) -> bool:
+        return self.pnl_inr > 0
 
 
-@dataclass
-class BacktestResult:
-    symbol: str
-    strategy: str
-    trades: list[Trade] = field(default_factory=list)
-    # Metrics computed after run
-    total_trades: int = 0
-    win_rate: float = 0.0
-    avg_gain_pct: float = 0.0
-    avg_loss_pct: float = 0.0
-    expected_value: float = 0.0
-    sharpe_ratio: float = 0.0
-    max_drawdown_pct: float = 0.0
-    total_return_pct: float = 0.0
-
-    def summary(self) -> str:
-        return (
-            f"\n{'='*55}\n"
-            f"  Backtest: {self.symbol} | Strategy: {self.strategy}\n"
-            f"{'='*55}\n"
-            f"  Trades:        {self.total_trades}\n"
-            f"  Win Rate:      {self.win_rate:.1f}%\n"
-            f"  Avg Gain:      {self.avg_gain_pct:.2f}%\n"
-            f"  Avg Loss:      {self.avg_loss_pct:.2f}%\n"
-            f"  Expected Val:  {self.expected_value:.2f}%\n"
-            f"  Sharpe Ratio:  {self.sharpe_ratio:.2f}\n"
-            f"  Max Drawdown:  {self.max_drawdown_pct:.2f}%\n"
-            f"  Total Return:  {self.total_return_pct:.2f}%\n"
-            f"{'='*55}"
-        )
-
+# ── Strategy ABC ──────────────────────────────────────────────────────────────
 
 class Strategy(ABC):
-    """Base class for all backtest strategies."""
+    name: str = "base"
 
     @abstractmethod
-    def generate_signal(self, df: pd.DataFrame, idx: int) -> Optional[Signal]:
-        """Given OHLCV dataframe and current index, return a Signal or None."""
+    def trades(self, symbol: str) -> Iterator[Trade]:
+        """Yield Trade objects for the given symbol."""
+
+    def signal(self, pit_df: pd.DataFrame, symbol: str) -> "Trade | None":
+        """Return a Trade for the last row of *pit_df* if it qualifies, else None.
+
+        Override this to support point-in-time replay via replay_strategy().
+        The default raises NotImplementedError.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement signal()")
 
 
-class RSIStrategy(Strategy):
-    """
-    Simple RSI mean-reversion strategy:
-    - Buy when RSI crosses above 30 (oversold recovery)
-    - SL: 2× ATR below entry
-    - Target: 3× ATR above entry
-    """
+# ── Gap Strategy ──────────────────────────────────────────────────────────────
 
-    def __init__(self, rsi_period: int = 14, atr_period: int = 14):
-        self.rsi_period = rsi_period
-        self.atr_period = atr_period
+class GapStrategy(Strategy):
+    """Daily gap-up strategy using OHLC data only."""
 
-    def generate_signal(self, df: pd.DataFrame, idx: int) -> Optional[Signal]:
-        if idx < max(self.rsi_period, self.atr_period) + 2:
-            return None
+    name = "gap"
 
-        window = df.iloc[: idx + 1]
-        rsi = _compute_rsi(window["Close"], self.rsi_period)
-        atr = _compute_atr(window, self.atr_period)
+    def __init__(self, threshold: float = 2.0):
+        self.threshold = threshold
 
-        if len(rsi) < 2 or atr == 0:
-            return None
-
-        prev_rsi = rsi.iloc[-2]
-        curr_rsi = rsi.iloc[-1]
-        price = df.iloc[idx]["Close"]
-
-        # RSI crosses above 30 from below
-        if prev_rsi < 30 and curr_rsi >= 30:
-            sl = price - 2 * atr
-            target = price + 3 * atr
-            return Signal(
-                type=SignalType.BUY,
-                price=price,
-                stop_loss=sl,
-                target=target,
-                confidence=0.6,
-                reason=f"RSI crossover {prev_rsi:.1f}→{curr_rsi:.1f}",
-            )
-        return None
-
-
-class MACDStrategy(Strategy):
-    """
-    MACD bullish crossover strategy:
-    - Buy when MACD line crosses above signal line
-    - SL: 1.5× ATR below entry
-    - Target: 2.5× ATR above entry
-    """
-
-    def generate_signal(self, df: pd.DataFrame, idx: int) -> Optional[Signal]:
-        if idx < 35:
-            return None
-
-        window = df.iloc[: idx + 1]["Close"]
-        macd_line, signal_line = _compute_macd(window)
-
-        if len(macd_line) < 2:
-            return None
-
-        atr = _compute_atr(df.iloc[: idx + 1], 14)
-        price = df.iloc[idx]["Close"]
-
-        if macd_line.iloc[-2] < signal_line.iloc[-2] and macd_line.iloc[-1] >= signal_line.iloc[-1]:
-            sl = price - 1.5 * atr
-            target = price + 2.5 * atr
-            return Signal(
-                type=SignalType.BUY,
-                price=price,
-                stop_loss=sl,
-                target=target,
-                confidence=0.65,
-                reason="MACD bullish crossover",
-            )
-        return None
-
-
-class Backtester:
-    """Event-driven backtester with slippage and brokerage simulation."""
-
-    def __init__(self, slippage: float = SLIPPAGE, brokerage: float = BROKERAGE):
-        self.slippage = slippage
-        self.brokerage = brokerage
-
-    def run(
-        self,
-        symbol: str,
-        strategy: Strategy,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        walk_forward_splits: int = 1,
-    ) -> BacktestResult:
-        """Run backtest on stored price history."""
+    def trades(self, symbol: str) -> Iterator[Trade]:
         path = kb_path(symbol) / "price_history.parquet"
         if not path.exists():
-            raise FileNotFoundError(f"No price history for {symbol}. Run DataAgent first.")
+            return
 
         df = pd.read_parquet(path).sort_index()
         df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
+        df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
 
-        if start_date:
-            df = df[df.index >= start_date]
-        if end_date:
-            df = df[df.index <= end_date]
+        df["prev_close"] = df["Close"].shift(1)
+        df["gap_pct"]    = (df["Open"] - df["prev_close"]) / df["prev_close"] * 100
+        df["ema50"]      = df["Close"].ewm(span=50, adjust=False).mean()
+        ema12            = df["Close"].ewm(span=12, adjust=False).mean()
+        ema26            = df["Close"].ewm(span=26, adjust=False).mean()
+        macd             = ema12 - ema26
+        df["macd_bull"]  = (macd - macd.ewm(span=9, adjust=False).mean()) > 0
+        df["vol_avg20"]  = df["Volume"].rolling(20).mean()
 
-        if walk_forward_splits > 1:
-            return self._walk_forward(symbol, strategy, df, walk_forward_splits)
-
-        result = self._run_on_df(symbol, strategy.__class__.__name__, df)
-        _compute_metrics(result)
-        return result
-
-    def _run_on_df(self, symbol: str, strategy_name: str, df: pd.DataFrame) -> BacktestResult:
-        result = BacktestResult(symbol=symbol, strategy=strategy_name)
-        strategy = _strategy_from_name(strategy_name)
-        open_trade: Optional[Trade] = None
-
-        for i in range(len(df)):
-            row = df.iloc[i]
-            date = df.index[i]
-            high = row["High"]
-            low = row["Low"]
-            close = row["Close"]
-
-            # Manage open trade
-            if open_trade is not None:
-                # Check SL hit
-                if low <= open_trade.stop_loss:
-                    exit_price = open_trade.stop_loss * (1 - self.slippage)
-                    open_trade.exit_date = date
-                    open_trade.exit_price = exit_price
-                    open_trade.pnl_pct = _pnl(open_trade.entry_price, exit_price, self.brokerage)
-                    open_trade.outcome = "loss"
-                    result.trades.append(open_trade)
-                    open_trade = None
-                    continue
-
-                # Check target hit
-                if high >= open_trade.target:
-                    exit_price = open_trade.target * (1 - self.slippage)
-                    open_trade.exit_date = date
-                    open_trade.exit_price = exit_price
-                    open_trade.pnl_pct = _pnl(open_trade.entry_price, exit_price, self.brokerage)
-                    open_trade.outcome = "win"
-                    result.trades.append(open_trade)
-                    open_trade = None
-                    continue
-
-                # Timeout after 20 bars
-                entry_idx = df.index.get_loc(open_trade.entry_date)
-                if i - entry_idx >= 20:
-                    open_trade.exit_date = date
-                    open_trade.exit_price = close * (1 - self.slippage)
-                    open_trade.pnl_pct = _pnl(open_trade.entry_price, open_trade.exit_price, self.brokerage)
-                    open_trade.outcome = "timeout"
-                    result.trades.append(open_trade)
-                    open_trade = None
+        for date, row in df[df["gap_pct"] >= self.threshold].iterrows():
+            if row["Volume"] < row["vol_avg20"] * 1.5:
+                continue
+            if row["prev_close"] < row["ema50"]:
+                continue
+            if not row["macd_bull"]:
                 continue
 
-            # Look for new signal
-            signal = strategy.generate_signal(df, i)
-            if signal and signal.type == SignalType.BUY:
-                entry_price = signal.price * (1 + self.slippage)
-                open_trade = Trade(
-                    symbol=symbol,
-                    entry_date=date,
-                    entry_price=entry_price,
-                    stop_loss=signal.stop_loss,
-                    target=signal.target,
-                )
+            entry  = round(row["Open"] * (1 + SLIPPAGE), 2)
+            sl     = round(row["prev_close"] * 1.002, 2)
+            gap    = row["gap_pct"]
+            t2     = round(row["Open"] * (1 + gap * 2 / 100), 2)
+            t1     = round(row["Open"] * (1 + gap / 100), 2)
+            qty    = max(1, int(CAPITAL * POSITION_PCT / entry))
 
-        # Close any open trade at end
-        if open_trade is not None:
-            last_close = df.iloc[-1]["Close"]
-            open_trade.exit_date = df.index[-1]
-            open_trade.exit_price = last_close
-            open_trade.pnl_pct = _pnl(open_trade.entry_price, last_close, self.brokerage)
-            open_trade.outcome = "timeout"
-            result.trades.append(open_trade)
+            low, high, close = row["Low"], row["High"], row["Close"]
 
-        return result
+            if low <= sl:
+                exit_p, reason = sl, "SL"
+            elif high >= t2:
+                exit_p, reason = t2, "T2"
+            elif high >= t1:
+                trail  = round(high * 0.995, 2)
+                exit_p = max(trail, close)
+                reason = "Trail"
+            else:
+                exit_p, reason = close, "Close"
 
-    def _walk_forward(
-        self, symbol: str, strategy: Strategy, df: pd.DataFrame, splits: int
-    ) -> BacktestResult:
-        """Walk-forward validation: train on first 70%, test on last 30% of each split."""
-        chunk_size = len(df) // splits
-        all_trades: list[Trade] = []
-        strategy_name = strategy.__class__.__name__
+            yield Trade(
+                symbol=symbol, entry_dt=date, exit_dt=date,
+                entry=entry, exit=exit_p, qty=qty,
+                exit_reason=reason, strategy=self.name,
+            )
 
-        for i in range(splits):
-            start = i * chunk_size
-            end = start + chunk_size
-            test_start = start + int(chunk_size * 0.7)
-            test_df = df.iloc[test_start:end]
-            if len(test_df) < 30:
+    def signal(self, pit_df: pd.DataFrame, symbol: str) -> "Trade | None":
+        """Return a Trade for the last row of *pit_df* if it qualifies, else None.
+
+        *pit_df* must be a point-in-time slice (all rows up to and including
+        the day being evaluated), sorted ascending by date.
+        """
+        df = pit_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+        if len(df) < 2:
+            return None
+
+        row      = df.iloc[-1]
+        prev_row = df.iloc[-2]
+
+        gap_pct = (row["Open"] - prev_row["Close"]) / prev_row["Close"] * 100
+        if gap_pct < self.threshold:
+            return None
+
+        ema50     = float(df["Close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        ema12     = df["Close"].ewm(span=12, adjust=False).mean()
+        ema26     = df["Close"].ewm(span=26, adjust=False).mean()
+        macd      = ema12 - ema26
+        macd_bull = (macd - macd.ewm(span=9, adjust=False).mean()).iloc[-1] > 0
+        vol_avg20 = float(df["Volume"].rolling(20).mean().iloc[-1])
+
+        if row["Volume"] < vol_avg20 * 1.5:
+            return None
+        if prev_row["Close"] < ema50:
+            return None
+        if not macd_bull:
+            return None
+
+        entry  = round(float(row["Open"]) * (1 + SLIPPAGE), 2)
+        sl     = round(float(prev_row["Close"]) * 1.002, 2)
+        t2     = round(float(row["Open"]) * (1 + gap_pct * 2 / 100), 2)
+        t1     = round(float(row["Open"]) * (1 + gap_pct / 100), 2)
+        qty    = max(1, int(CAPITAL * POSITION_PCT / entry))
+
+        low, high, close = float(row["Low"]), float(row["High"]), float(row["Close"])
+
+        if low <= sl:
+            exit_p, reason = sl, "SL"
+        elif high >= t2:
+            exit_p, reason = t2, "T2"
+        elif high >= t1:
+            trail  = round(high * 0.995, 2)
+            exit_p = max(trail, close)
+            reason = "Trail"
+        else:
+            exit_p, reason = close, "Close"
+
+        ts = df.index[-1]
+        return Trade(
+            symbol=symbol, entry_dt=ts, exit_dt=ts,
+            entry=entry, exit=exit_p, qty=qty,
+            exit_reason=reason, strategy=self.name,
+        )
+
+
+# ── Intraday ML Strategy ──────────────────────────────────────────────────────
+
+class IntradayMLStrategy(Strategy):
+    """1h ML-signal strategy using india_intraday_model features."""
+
+    name = "ml_intraday"
+
+    def __init__(self, threshold: float = 0.55,
+                 model_path: Path | None = None):
+        self.threshold  = threshold
+        self.model_path = model_path or Path("stocks_1h/india_intraday_model.pkl")
+        self._model     = None
+        self._features  = None
+        self._nifty     = None
+        self._banknifty = None
+        self._vix       = None
+
+    def _load(self) -> bool:
+        if self._model is not None:
+            return True
+        if not self.model_path.exists():
+            return False
+        with open(self.model_path, "rb") as f:
+            saved = pickle.load(f)
+        self._model    = saved["model"]
+        self._features = saved["features"]
+
+        data_dir = self.model_path.parent
+
+        def _s(name: str) -> pd.Series:
+            p = data_dir / f"{name}.parquet"
+            if not p.exists():
+                return pd.Series(dtype=float)
+            d = pd.read_parquet(p)
+            d.index = pd.to_datetime(d.index, utc=True).tz_localize(None) if d.index.tz else d.index
+            return d["Close"]
+
+        self._nifty     = _s("NIFTY_1h")
+        self._banknifty = _s("BANKNIFTY_1h")
+        self._vix       = _s("VIX_1h")
+        return True
+
+    def trades(self, symbol: str) -> Iterator[Trade]:
+        if not self._load():
+            return
+
+        from models.india_intraday_model import build_features, DATA_DIR
+        sym = symbol.replace(".NS", "").replace("-", "_")
+        path = DATA_DIR / f"{sym}.parquet"
+        if not path.exists():
+            return
+
+        df = pd.read_parquet(path)
+        df.index = pd.to_datetime(df.index, utc=True).tz_localize(None) if df.index.tz else df.index
+        df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+        if len(df) < 200:
+            return
+
+        feat  = build_features(df, self._nifty, self._banknifty, self._vix)
+        X     = feat[self._features].fillna(0)
+        proba = self._model.predict_proba(X)[:, 1]
+        close = df["Close"].values
+        dates = df.index
+
+        STOP_PCT   = 1.0
+        TARGET_PCT = 2.5
+        TRAIL_PCT  = 0.5
+
+        i = 0
+        while i < len(df) - 1:
+            if proba[i] < self.threshold:
+                i += 1
                 continue
-            partial = self._run_on_df(symbol, strategy_name, test_df)
-            all_trades.extend(partial.trades)
 
-        result = BacktestResult(symbol=symbol, strategy=f"{strategy_name}(WF×{splits})", trades=all_trades)
-        _compute_metrics(result)
-        return result
+            entry  = close[i] * (1 + SLIPPAGE)
+            sl     = entry * (1 - STOP_PCT / 100)
+            target = entry * (1 + TARGET_PCT / 100)
+            trail  = sl
+            qty    = max(1, int(CAPITAL * POSITION_PCT / entry))
+            entry_dt = dates[i]
 
+            exit_p = exit_reason = None
+            j = i + 1
+            while j < len(df):
+                price    = close[j]
+                same_day = dates[j].date() == entry_dt.date()
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+                if price > entry * (1 + TRAIL_PCT / 100):
+                    new_trail = price * (1 - TRAIL_PCT / 100)
+                    if new_trail > trail:
+                        trail = new_trail
 
-def _compute_rsi(series: pd.Series, period: int) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+                if price <= trail:
+                    exit_p, exit_reason = trail, "Trail/SL"
+                    break
+                if price >= target:
+                    exit_p, exit_reason = target, "Target"
+                    break
+                if not same_day or j == len(df) - 1:
+                    exit_p, exit_reason = price, "EOD"
+                    break
+                j += 1
 
+            if exit_p is None:
+                i += 1
+                continue
 
-def _compute_atr(df: pd.DataFrame, period: int) -> float:
-    high = df["High"]
-    low = df["Low"]
-    close = df["Close"]
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs(),
-    ], axis=1).max(axis=1)
-    atr = tr.rolling(period).mean()
-    return float(atr.iloc[-1]) if not atr.empty and not np.isnan(atr.iloc[-1]) else 0.0
-
-
-def _compute_macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd = ema_fast - ema_slow
-    signal_line = macd.ewm(span=signal, adjust=False).mean()
-    return macd, signal_line
-
-
-def _pnl(entry: float, exit_: float, brokerage: float) -> float:
-    gross = (exit_ - entry) / entry * 100
-    cost = brokerage * 2 * 100  # both sides
-    return round(gross - cost, 4)
+            yield Trade(
+                symbol=symbol, entry_dt=entry_dt, exit_dt=dates[j],
+                entry=round(entry, 2), exit=round(exit_p, 2), qty=qty,
+                exit_reason=exit_reason, strategy=self.name,
+            )
+            i = j + 1
 
 
-def _strategy_from_name(name: str) -> Strategy:
-    strategies = {
-        "RSIStrategy": RSIStrategy(),
-        "MACDStrategy": MACDStrategy(),
-        "rsi": RSIStrategy(),
-        "macd": MACDStrategy(),
-    }
-    if name not in strategies:
-        raise ValueError(f"Unknown strategy: {name}. Available: {list(strategies.keys())}")
-    return strategies[name]
+# ── Runner + report ───────────────────────────────────────────────────────────
+
+def run(strategy: Strategy, symbols: list[str]) -> pd.DataFrame:
+    """Run strategy over all symbols; return a DataFrame of trades."""
+    rows = []
+    for sym in symbols:
+        for t in strategy.trades(sym):
+            rows.append({
+                "symbol":      t.symbol,
+                "entry_dt":    t.entry_dt,
+                "exit_dt":     t.exit_dt,
+                "entry":       t.entry,
+                "exit":        t.exit,
+                "qty":         t.qty,
+                "exit_reason": t.exit_reason,
+                "pnl_pct":     round(t.pnl_pct, 3),
+                "pnl_inr":     round(t.pnl_inr, 2),
+                "win":         t.win,
+                "strategy":    t.strategy,
+            })
+    return pd.DataFrame(rows)
 
 
-def _compute_metrics(result: BacktestResult) -> None:
-    trades = result.trades
-    result.total_trades = len(trades)
-    if not trades:
+def print_report(df: pd.DataFrame, strategy_name: str, params: str = "") -> None:
+    if df.empty:
+        print("No trades generated.")
         return
 
-    pnls = [t.pnl_pct for t in trades if t.pnl_pct is not None]
-    wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p <= 0]
+    wins   = df[df["win"]]
+    losses = df[~df["win"]]
+    pf     = (wins["pnl_inr"].sum() / abs(losses["pnl_inr"].sum())
+              if len(losses) and losses["pnl_inr"].sum() != 0 else float("inf"))
 
-    result.win_rate = len(wins) / len(pnls) * 100 if pnls else 0
-    result.avg_gain_pct = sum(wins) / len(wins) if wins else 0
-    result.avg_loss_pct = sum(losses) / len(losses) if losses else 0
-    result.expected_value = (
-        (result.win_rate / 100) * result.avg_gain_pct
-        + (1 - result.win_rate / 100) * result.avg_loss_pct
-    )
-    result.total_return_pct = sum(pnls)
+    SEP = "=" * 65
+    print(f"\n{SEP}")
+    print(f"  {strategy_name.upper()} BACKTEST  {params}")
+    print(f"  Period: {df['entry_dt'].min().date()} → {df['entry_dt'].max().date()}")
+    print(SEP)
+    print(f"  Total Trades     : {len(df)}")
+    print(f"  Win Rate         : {df['win'].mean()*100:.1f}%  ({len(wins)}W / {len(losses)}L)")
+    print(f"  Total Net P&L    : ₹{df['pnl_inr'].sum():+,.2f}")
+    print(f"  Avg Win          : ₹{wins['pnl_inr'].mean():+.2f}" if len(wins) else "  Avg Win          : —")
+    print(f"  Avg Loss         : ₹{losses['pnl_inr'].mean():+.2f}" if len(losses) else "  Avg Loss         : —")
+    print(f"  Profit Factor    : {pf:.2f}x")
+    print(f"  Worst Trade      : {df['pnl_pct'].min():.2f}%")
+    print(SEP)
 
-    # Sharpe ratio (annualised, assuming daily trades)
-    if len(pnls) > 1:
-        arr = np.array(pnls)
-        result.sharpe_ratio = float(arr.mean() / arr.std() * np.sqrt(252)) if arr.std() > 0 else 0.0
+    print(f"\n  {'SYMBOL':<14} {'TRADES':>7} {'WIN%':>6} {'NET P&L':>10} {'AVG':>8}")
+    print(f"  {'-'*50}")
+    for sym, grp in df.groupby("symbol"):
+        wr  = grp["win"].mean() * 100
+        pnl = grp["pnl_inr"].sum()
+        avg = grp["pnl_inr"].mean()
+        print(f"  {sym:<14} {len(grp):>7} {wr:>5.1f}% {pnl:>+10.2f} {avg:>+8.2f}")
 
-    # Max drawdown
-    equity = np.cumsum(pnls)
-    peak = np.maximum.accumulate(equity)
-    drawdown = equity - peak
-    result.max_drawdown_pct = float(drawdown.min()) if len(drawdown) > 0 else 0.0
+    print(f"\n  Exit Reason Breakdown:")
+    for reason, grp in df.groupby("exit_reason"):
+        wr = grp["win"].mean() * 100
+        print(f"    {reason:<10}: {len(grp):>4} trades | win {wr:.1f}% | avg ₹{grp['pnl_inr'].mean():+.2f}")
+    print(f"\n{SEP}\n")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
+def _default_symbols() -> list[str]:
+    try:
+        import yaml
+        with open("config.yaml") as f:
+            cfg = yaml.safe_load(f)
+        return list(cfg.get("watchlist", []))
+    except Exception:
+        return []
+
+
 if __name__ == "__main__":
-    import yaml
-    from dotenv import load_dotenv
-    from core.logger import setup_logging
-
-    load_dotenv()
-    with open("config.yaml") as f:
-        config = yaml.safe_load(f)
-    setup_logging(config)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--stock", default="RELIANCE")
-    parser.add_argument("--strategy", default="rsi", choices=["rsi", "macd"])
-    parser.add_argument("--start", default="2020-01-01")
-    parser.add_argument("--end", default=None)
-    parser.add_argument("--walk-forward", type=int, default=1)
+    parser = argparse.ArgumentParser(description="Unified backtester")
+    parser.add_argument("--strategy", choices=["gap", "ml_intraday"], default="gap")
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--symbols", nargs="*", default=None)
     args = parser.parse_args()
 
-    bt = Backtester()
-    strategy = _strategy_from_name(args.strategy)
-    result = bt.run(
-        symbol=args.stock,
-        strategy=strategy,
-        start_date=args.start,
-        end_date=args.end,
-        walk_forward_splits=args.walk_forward,
-    )
-    print(result.summary())
+    symbols = args.symbols or _default_symbols()
+    if not symbols:
+        print("No symbols. Pass --symbols or set watchlist in config.yaml.")
+        raise SystemExit(1)
 
-    if result.trades:
-        print(f"\n  Last 5 trades:")
-        for t in result.trades[-5:]:
-            print(f"    {t.entry_date.date()} → {t.exit_date.date() if t.exit_date else '?'} | "
-                  f"{t.outcome:8s} | {t.pnl_pct:+.2f}%")
+    if args.strategy == "gap":
+        threshold = args.threshold or 2.0
+        strategy  = GapStrategy(threshold=threshold)
+        params    = f"(gap >= {threshold}%)"
+    else:
+        threshold = args.threshold or 0.55
+        strategy  = IntradayMLStrategy(threshold=threshold)
+        params    = f"(threshold={threshold})"
+
+    df = run(strategy, symbols)
+    print_report(df, args.strategy, params)

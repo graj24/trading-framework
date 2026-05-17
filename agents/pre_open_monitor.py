@@ -384,20 +384,18 @@ class PreOpenMonitor(Agent):
         }
 
     def _add_to_watchlist(self, symbols: list[str]) -> None:
-        """Add new symbols to config.yaml watchlist."""
+        """Append new symbols to the dynamic watchlist file (LOW-10).
+
+        Was previously rewriting ``config.yaml`` and losing comments.
+        Now writes to ``data/dynamic_watchlist.json`` instead.
+        """
         try:
-            import yaml
-            with open("config.yaml") as f:
-                cfg = yaml.safe_load(f)
-            existing = set(cfg.get("watchlist", []))
-            new = [s for s in symbols if s not in existing]
+            from core.watchlist import add_to_dynamic_watchlist
+            new = add_to_dynamic_watchlist(symbols)
             if new:
-                cfg["watchlist"] = list(existing) + new
-                with open("config.yaml", "w") as f:
-                    yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
-                logger.info(f"Auto-added to watchlist: {new}")
+                logger.info(f"Auto-added to dynamic watchlist: {new}")
         except Exception as e:
-            logger.error(f"Failed to update watchlist: {e}")
+            logger.error(f"Failed to update dynamic watchlist: {e}")
 
 
 if __name__ == "__main__":
