@@ -181,11 +181,31 @@ async def websocket_pm_events(ws: WebSocket, pm_id: str | None = None):
     EVENTS_DB = _Path("events.db")
     cursor = 0
 
-    # Send current latest_id so client knows where we start
+    # Send recent historical events on connect (last 50) so the page isn't empty
     if EVENTS_DB.exists():
-        with _sqlite3.connect(EVENTS_DB) as conn:
-            row = conn.execute("SELECT MAX(id) FROM events").fetchone()
-            cursor = row[0] or 0
+        try:
+            with _sqlite3.connect(EVENTS_DB) as conn:
+                conn.row_factory = _sqlite3.Row
+                if pm_id:
+                    rows = conn.execute(
+                        "SELECT * FROM (SELECT * FROM events WHERE pm_id = ? ORDER BY id DESC LIMIT 50) ORDER BY id ASC",
+                        (pm_id,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT * FROM (SELECT * FROM events ORDER BY id DESC LIMIT 50) ORDER BY id ASC"
+                    ).fetchall()
+            for row in rows:
+                d = dict(row)
+                try:
+                    d["payload"] = json.loads(d["payload"])
+                except Exception:
+                    pass
+                cursor = max(cursor, d["id"])
+                await ws.send_text(json.dumps({"type": "pm_event", "event": d, "historical": True}))
+        except Exception as e:
+            logger.debug(f"Backfill error: {e}")
+
     await ws.send_text(json.dumps({"type": "cursor", "latest_id": cursor}))
 
     try:
