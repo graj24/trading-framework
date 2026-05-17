@@ -12,10 +12,35 @@ import { cn } from "@/lib/cn";
 const SERVICES = [
   {
     id: "groq",
-    label: "Groq (LLM)",
-    description: "Powers all LLM decisions — Strategist brain, master agent, triage daemon.",
+    label: "Groq (LLM — active)",
+    description: "Primary LLM provider. Powers Strategist brain, master agent, triage daemon. Models: llama-3.3-70b (heartbeat), llama-3.1-8b (off-shift).",
     docsUrl: "https://console.groq.com",
     envKeys: [{ key: "GROQ_API_KEY", label: "API Key", type: "password" as const }],
+  },
+  {
+    id: "openai",
+    label: "OpenAI (LLM — optional)",
+    description: "Alternate LLM provider. Used when llm.model in config.yaml starts with openai/ (e.g. openai/gpt-4o-mini).",
+    docsUrl: "https://platform.openai.com/account/api-keys",
+    envKeys: [{ key: "OPENAI_API_KEY", label: "API Key", type: "password" as const }],
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic (LLM — optional)",
+    description: "Alternate LLM provider. Used when llm.model starts with anthropic/ (e.g. anthropic/claude-3-5-sonnet-20241022).",
+    docsUrl: "https://console.anthropic.com/settings/keys",
+    envKeys: [{ key: "ANTHROPIC_API_KEY", label: "API Key", type: "password" as const }],
+  },
+  {
+    id: "bedrock",
+    label: "AWS Bedrock (LLM — optional)",
+    description: "Alternate LLM provider via AWS. Used when llm.model starts with bedrock/. Requires IAM bedrock:InvokeModel permission.",
+    docsUrl: "https://console.aws.amazon.com/bedrock",
+    envKeys: [
+      { key: "AWS_ACCESS_KEY_ID",     label: "Access Key ID",     type: "password" as const },
+      { key: "AWS_SECRET_ACCESS_KEY", label: "Secret Access Key", type: "password" as const },
+      { key: "AWS_REGION",            label: "Region",            type: "text" as const },
+    ],
   },
   {
     id: "yfinance",

@@ -126,6 +126,79 @@ def services_health():
             return {"status": "error", "error": str(e),
                     "fix": "Check GROQ_API_KEY is valid at console.groq.com"}
 
+    # ── OpenAI ────────────────────────────────────────────────────────────────
+    def _check_openai():
+        key = os.getenv("OPENAI_API_KEY", "")
+        if not key:
+            return {"status": "unconfigured",
+                    "fix": "Set OPENAI_API_KEY in .env (optional — only needed if llm.model starts with openai/)"}
+        try:
+            import litellm
+            t0 = time.time()
+            r = litellm.completion(
+                model="openai/gpt-4o-mini",
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=3,
+            )
+            return {"status": "ok", "latency_ms": round((time.time() - t0) * 1000),
+                    "model": "gpt-4o-mini"}
+        except Exception as e:
+            err = str(e)
+            fix = "OPENAI_API_KEY is invalid or quota exceeded — check platform.openai.com/account/api-keys"
+            return {"status": "error", "error": err, "fix": fix}
+
+    # ── Anthropic ─────────────────────────────────────────────────────────────
+    def _check_anthropic():
+        key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not key:
+            return {"status": "unconfigured",
+                    "fix": "Set ANTHROPIC_API_KEY in .env (optional — only needed if llm.model starts with anthropic/)"}
+        try:
+            import litellm
+            t0 = time.time()
+            litellm.completion(
+                model="anthropic/claude-3-5-sonnet-20241022",
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=3,
+            )
+            return {"status": "ok", "latency_ms": round((time.time() - t0) * 1000),
+                    "model": "claude-3-5-sonnet"}
+        except Exception as e:
+            err = str(e)
+            fix = "ANTHROPIC_API_KEY is invalid — check console.anthropic.com/settings/keys"
+            return {"status": "error", "error": err, "fix": fix}
+
+    # ── AWS Bedrock ───────────────────────────────────────────────────────────
+    def _check_bedrock():
+        key_id  = os.getenv("AWS_ACCESS_KEY_ID", "")
+        secret  = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+        region  = os.getenv("AWS_REGION", "us-east-1")
+        if not key_id or not secret:
+            return {"status": "unconfigured",
+                    "fix": "Set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION in .env (optional — only needed if llm.model starts with bedrock/)"}
+        try:
+            import litellm
+            t0 = time.time()
+            litellm.completion(
+                model="bedrock/anthropic.claude-3-haiku-20240307-v1:0",
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=3,
+                aws_access_key_id=key_id,
+                aws_secret_access_key=secret,
+                aws_region_name=region,
+            )
+            return {"status": "ok", "latency_ms": round((time.time() - t0) * 1000),
+                    "model": f"claude-3-haiku ({region})"}
+        except Exception as e:
+            err = str(e)
+            if "AccessDenied" in err or "not authorized" in err.lower():
+                fix = "IAM user lacks bedrock:InvokeModel permission — add it in AWS IAM console"
+            elif "Could not connect" in err or "EndpointResolutionError" in err:
+                fix = f"Check AWS_REGION ({region}) is a region where Bedrock is available"
+            else:
+                fix = "Check AWS credentials and that Bedrock model access is enabled in the AWS console"
+            return {"status": "error", "error": err, "fix": fix}
+
     # ── Yahoo Finance ─────────────────────────────────────────────────────────
     def _check_yfinance():
         try:
@@ -252,6 +325,9 @@ def services_health():
             return {"status": "error", "error": str(e)}
 
     results["groq"]       = _check_groq()
+    results["openai"]     = _check_openai()
+    results["anthropic"]  = _check_anthropic()
+    results["bedrock"]    = _check_bedrock()
     results["yfinance"]   = _check_yfinance()
     results["groww"]      = _check_groww()
     results["telegram"]   = _check_telegram()
