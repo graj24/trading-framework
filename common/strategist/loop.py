@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 ACTIONS = ("DO_NOTHING", "RESEARCH", "TRADE", "EVOLVE", "PIVOT")
 
 # Max tool calls per cycle (prevents runaway loops)
-MAX_TOOL_CALLS = 12
+MAX_TOOL_CALLS = 25
 
 
 class Strategist:
@@ -125,6 +125,12 @@ You can call tools (read_file, write_file, run_shell, run_pytest, web_fetch, web
 sql_query, get_prices, memory_store, memory_search) as many times as needed before deciding.
 RULE: Before forming any entry/exit price hypothesis, call get_prices() to get real current prices.
 Never guess or use training-data prices — NSE prices change daily.
+
+EFFICIENCY RULES:
+1. Start by calling memory_search to check what you already know — don't redo past research.
+2. Aim to decide within 5-8 tool calls. Don't loop endlessly on web_search if it returns nothing.
+3. If unsure, return DO_NOTHING with a clear reasoning. Better than hitting the tool call limit.
+4. Only do EVOLVE/PIVOT if you have specific evidence — otherwise stay in your current strategy.
 
 When done, return a JSON object as your final message:
 {{
