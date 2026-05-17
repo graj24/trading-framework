@@ -8,6 +8,7 @@ import { Pipeline } from "@/pages/Pipeline";
 import { Backtest } from "@/pages/Backtest";
 import { Setup } from "@/pages/Setup";
 import { Replay } from "@/pages/Replay";
+import { Infra } from "@/pages/Infra";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 30000 } } });
@@ -27,6 +28,7 @@ function AppShell() {
             <Route path="/backtest" element={<Backtest />} />
             <Route path="/replay" element={<Replay />} />
             <Route path="/setup" element={<Setup />} />
+            <Route path="/infra" element={<Infra />} />
           </Routes>
         </main>
       </div>

@@ -12,18 +12,17 @@ Schedule (IST):
 """
 from __future__ import annotations
 
-import argparse
 import logging
-import yaml
 from datetime import datetime
 from dotenv import load_dotenv
+
+from core.config import get_config
 
 logger = logging.getLogger(__name__)
 
 
 def _load_config() -> dict:
-    with open("config.yaml") as f:
-        return yaml.safe_load(f)
+    return get_config()
 
 
 # ── Job functions ─────────────────────────────────────────────────────────────

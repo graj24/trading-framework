@@ -9,11 +9,12 @@ ROOT = Path(__file__).parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from api.routers import trades, signals, market, config, backtest, agents, ws, candles
+from api.routers import trades, signals, market, config, backtest, agents, ws, candles, infra
 
 app = FastAPI(
     title="Bloomberg Terminal API",
@@ -21,9 +22,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_default_origins = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+_cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", _default_origins).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,6 +42,7 @@ app.include_router(backtest.router)
 app.include_router(agents.router)
 app.include_router(ws.router)
 app.include_router(candles.router)
+app.include_router(infra.router)
 
 
 @app.get("/api/health")

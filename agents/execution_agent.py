@@ -13,12 +13,41 @@ from typing import Optional
 import yfinance as yf
 
 from agents.base import Agent, AgentResult
+from core.costs import SLIPPAGE_FRAC as SLIPPAGE, BROKERAGE_FRAC as BROKERAGE
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = Path(__file__).parent.parent / "paper_trades.db"
-SLIPPAGE = 0.0005
-BROKERAGE = 0.0003  # per side
+
+
+def migrate_trades_schema(db_path=None) -> None:
+    """Idempotently ensure the trades table exists with all columns."""
+    path = db_path or DB_PATH
+    conn = sqlite3.connect(path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id            TEXT PRIMARY KEY,
+            symbol        TEXT NOT NULL,
+            entry_date    TEXT,
+            entry_price   REAL,
+            stop_loss     REAL,
+            target        REAL,
+            position_size REAL,
+            exit_date     TEXT,
+            exit_price    REAL,
+            pnl_pct       REAL,
+            pnl_inr       REAL,
+            outcome       TEXT DEFAULT 'open',
+            reasoning     TEXT,
+            signals_json  TEXT,
+            created_at    TEXT
+        )
+    """)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
+    if "signals_json" not in cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN signals_json TEXT")
+    conn.commit()
+    conn.close()
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -70,6 +99,34 @@ def get_period_pnl_pct(days: int) -> float:
     return round(sum(r[0] * r[1] for r in rows if r[0] and r[1]) / total_size, 4)
 
 
+def get_open_position_symbols(db_path=None) -> list[str]:
+    """Return list of symbols with currently open positions."""
+    path = db_path or DB_PATH
+    if not Path(path).exists():
+        return []
+    with sqlite3.connect(path) as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT symbol FROM trades WHERE outcome='open'"
+        ).fetchall()]
+
+
+def today_pnl_pct(capital: float = 0, db_path=None) -> float:
+    """Return today's realised PNL as a fraction of capital (or 0 if capital=0)."""
+    if capital == 0:
+        return 0.0
+    path = db_path or DB_PATH
+    if not Path(path).exists():
+        return 0.0
+    today = date.today().isoformat()
+    with sqlite3.connect(path) as conn:
+        rows = conn.execute(
+            "SELECT pnl_inr FROM trades WHERE outcome != 'open' AND exit_date >= ?",
+            (today,),
+        ).fetchall()
+    total_inr = sum(r[0] for r in rows if r[0])
+    return round(total_inr / capital, 6) if capital else 0.0
+
+
 def _get_ltp(symbol: str) -> float:
     try:
         t = yf.Ticker(symbol + ".NS")
@@ -108,8 +165,10 @@ class ExecutionAgent(Agent):
 
     def execute_trade(self, symbol: str, entry_price: float, stop_loss: float,
                       target: float, position_size: float, reasoning: str = "",
-                      signals: dict | None = None) -> dict:
+                      signals: dict | None = None,
+                      signals_at_entry: dict | None = None) -> dict:
         """Open a new paper trade."""
+        signals = signals or signals_at_entry  # accept both kwarg names
         if self.mode != "paper":
             raise RuntimeError("Live trading not yet enabled. Set mode=paper in config.")
 
