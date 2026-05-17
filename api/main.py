@@ -53,4 +53,14 @@ def health():
 # Serve built frontend if it exists
 FRONTEND_DIST = ROOT / "frontend" / "dist"
 if FRONTEND_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="static")
+    from fastapi.responses import FileResponse
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        """Serve index.html for all non-API routes (SPA client-side routing)."""
+        file = FRONTEND_DIST / full_path
+        if file.is_file():
+            return FileResponse(str(file))
+        return FileResponse(str(FRONTEND_DIST / "index.html"))
+
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
