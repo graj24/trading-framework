@@ -152,3 +152,63 @@ async def websocket_pm_events(ws: WebSocket, pm_id: str | None = None):
         pass
     finally:
         logger.info("PM events WS client disconnected")
+
+
+@router.websocket("/ws/journal/{pm_id}")
+async def websocket_journal(ws: WebSocket, pm_id: str):
+    """Tail pm_<id>/state/journal.md in real-time."""
+    from pathlib import Path as _Path
+    await ws.accept()
+    journal_path = _Path(f"pm_{pm_id}/state/journal.md")
+    last_size = journal_path.stat().st_size if journal_path.exists() else 0
+
+    try:
+        # Send existing content first
+        if journal_path.exists():
+            await ws.send_text(json.dumps({
+                "type": "journal_init",
+                "pm_id": pm_id,
+                "content": journal_path.read_text()[-8000:],  # last 8k chars
+            }))
+        while True:
+            await asyncio.sleep(2)
+            if not journal_path.exists():
+                continue
+            size = journal_path.stat().st_size
+            if size > last_size:
+                # Read only the new bytes
+                with open(journal_path, "rb") as f:
+                    f.seek(last_size)
+                    new_content = f.read().decode("utf-8", errors="replace")
+                last_size = size
+                await ws.send_text(json.dumps({
+                    "type": "journal_append",
+                    "pm_id": pm_id,
+                    "content": new_content,
+                }))
+            # Handle pings
+            try:
+                data = await asyncio.wait_for(ws.receive_text(), timeout=0.01)
+                if json.loads(data).get("type") == "ping":
+                    await ws.send_text(json.dumps({"type": "pong"}))
+            except (asyncio.TimeoutError, Exception):
+                pass
+    except WebSocketDisconnect:
+        pass
+
+
+@router.websocket("/ws/leaderboard")
+async def websocket_leaderboard(ws: WebSocket):
+    """Push leaderboard updates every 30s."""
+    await ws.accept()
+    try:
+        while True:
+            try:
+                from common.leaderboard.snapshot import get_leaderboard
+                board = get_leaderboard()
+                await ws.send_text(json.dumps({"type": "leaderboard", "data": board}))
+            except Exception as e:
+                logger.debug(f"Leaderboard WS error: {e}")
+            await asyncio.sleep(30)
+    except WebSocketDisconnect:
+        pass

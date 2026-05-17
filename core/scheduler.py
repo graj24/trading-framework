@@ -23,6 +23,12 @@ from core.config import get_config
 logger = logging.getLogger(__name__)
 
 
+def today_pnl_pct(capital: float, db_path=None) -> float:
+    """Module-level wrapper so tests can patch core.scheduler.today_pnl_pct."""
+    from agents.execution_agent import today_pnl_pct as _fn
+    return _fn(capital, db_path=db_path)
+
+
 def _load_config() -> dict:
     return get_config()
 
@@ -30,25 +36,27 @@ def _load_config() -> dict:
 # ── Multica heartbeat ─────────────────────────────────────────────────────────
 
 def _multica_wakeup(pm_id: str, shift: str):
-    """POST a wakeup issue to Multica for the given PM."""
+    """Publish pm.wakeup event to the bus. Optionally also POST to Multica if token is set."""
     import requests
     from core.pm_state import build_wakeup_context
 
-    server = os.getenv("MULTICA_SERVER_URL", "http://13.232.42.85:8080")
+    # Always publish to event bus — strategist daemon subscribes to this
+    try:
+        from core.event_bus import get_bus
+        get_bus().publish(
+            f"pm.wakeup.{pm_id}",
+            {"trigger": "heartbeat", "shift": shift},
+            pm_id=pm_id,
+            severity="INFO",
+        )
+        logger.info(f"PM{pm_id} wakeup published to event bus [{shift}]")
+    except Exception as e:
+        logger.error(f"PM{pm_id} event bus wakeup failed: {e}")
+
+    # Optionally also notify Multica (for issue-based workflow)
+    server = os.getenv("MULTICA_SERVER_URL", "")
     token = os.getenv("MULTICA_TOKEN", "")
-    if not token:
-        logger.warning("MULTICA_TOKEN not set — skipping PM wakeup via Multica")
-        # Still publish to event bus so daemons can react
-        try:
-            from core.event_bus import get_bus
-            get_bus().publish(
-                f"pm.wakeup.{pm_id}",
-                {"trigger": "heartbeat", "shift": shift},
-                pm_id=pm_id,
-                severity="INFO",
-            )
-        except Exception:
-            pass
+    if not server or not token:
         return
 
     context = build_wakeup_context(pm_id, shift=shift)
@@ -66,11 +74,11 @@ def _multica_wakeup(pm_id: str, shift: str):
             timeout=10,
         )
         if resp.status_code in (200, 201):
-            logger.info(f"PM{pm_id} wakeup issued via Multica [{shift}]")
+            logger.info(f"PM{pm_id} wakeup also issued via Multica [{shift}]")
         else:
             logger.warning(f"Multica wakeup failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
-        logger.error(f"Multica wakeup error: {e}")
+        logger.debug(f"Multica wakeup error (non-critical): {e}")
 
 
 def job_pm_heartbeat(shift: str):
@@ -151,6 +159,11 @@ def job_preopen_scan():
 
         # Pre-open price scan
         result = PreOpenMonitor(config).scan()
+        # Anomaly alert: if scan returned no results at all, something is wrong
+        all_preopen = result.get("all_preopen", result.get("buy_signals", []) + result.get("avoid_signals", []))
+        if not all_preopen:
+            alerter.send("⚠️ ANOMALY: Pre-open scan returned 0 results — data feed may be down")
+            logger.warning("Pre-open scan returned 0 results — possible data feed issue")
         for s in result.get("buy_signals", []):
             logger.info(f"  🟢 Gap-up: {s['symbol']} {s['gap_pct']:+.1f}% — {s['reasoning']}")
             alerter.send(f"⚡ PRE-OPEN GAP-UP: <b>{s['symbol']}</b> {s['gap_pct']:+.1f}%\n"
@@ -166,11 +179,18 @@ def job_discover_stocks():
     logger.info("🔍 [07:00] Discovering stocks from news + volume + bulk deals...")
     try:
         from agents.discovery_agent import DiscoveryAgent
+        from common.core.pm_runtime import list_pms
+        from common.core.pm_watchlist import add_to_pm_watchlist
         config = _load_config()
         result = DiscoveryAgent(config).discover(top_n=10)
-        added = result.get("added_to_watchlist", [])
         candidates = result.get("candidates", [])
-        logger.info(f"  Discovered {len(candidates)} candidates, added to watchlist: {added or 'none new'}")
+        top_symbols = [c["symbol"] for c in candidates[:5]]
+        # Add discovered symbols to every active PM's watchlist
+        for pm in list_pms(active_only=True):
+            added = add_to_pm_watchlist(pm["pm_id"], top_symbols)
+            if added:
+                logger.info(f"  PM{pm['pm_id']} watchlist updated: +{added}")
+        logger.info(f"  Discovered {len(candidates)} candidates")
         for c in candidates[:5]:
             logger.info(f"  #{candidates.index(c)+1} {c['symbol']} score={c['score']:.1f} — {c['reasons'][0] if c['reasons'] else ''}")
     except Exception as e:
@@ -186,12 +206,16 @@ def job_pre_market_analysis():
             return
         from agents.technical_agent import TechnicalAgent
         from agents.regime_agent import RegimeAgent
+        from common.core.pm_runtime import list_pms
+        from common.core.pm_watchlist import get_pm_watchlist
         config = _load_config()
         regime = RegimeAgent(config).run({})
         logger.info(f"Regime: {regime.data.get('regime', 'unknown')}")
-        for symbol in config["watchlist"]:
-            tech = TechnicalAgent(config).run({"symbol": symbol})
-            logger.info(f"  {symbol}: score={tech.data.get('technical_score', 0)}/10")
+        for pm in list_pms(active_only=True):
+            watchlist = get_pm_watchlist(pm["pm_id"], config)
+            for symbol in watchlist:
+                tech = TechnicalAgent(config).run({"symbol": symbol})
+                logger.info(f"  PM{pm['pm_id']} {symbol}: score={tech.data.get('technical_score', 0)}/10")
     except Exception as e:
         logger.error(f"Pre-market analysis failed: {e}")
 
@@ -208,12 +232,12 @@ def job_execute_trades():
         from agents.master import MasterAgent
         from agents.execution_agent import ExecutionAgent
         from core.alerts import TelegramAlerter
+        from common.core.pm_runtime import list_pms
+        from common.core.pm_watchlist import get_pm_watchlist
         config = _load_config()
-        master = MasterAgent(config)
-        executor = ExecutionAgent(config)
         alerter = TelegramAlerter()
 
-        # Fetch symbols that already have an open position — skip re-entry
+        # Fetch all open symbols once
         open_symbols: set[str] = set()
         _db = _Path("paper_trades.db")
         if _db.exists():
@@ -222,41 +246,70 @@ def job_execute_trades():
                     "SELECT symbol FROM trades WHERE outcome='open'"
                 ).fetchall()}
 
-        for symbol in config["watchlist"]:
-            result = master.run_for_stock(symbol)
-            if not result.ok():
-                continue
-            d = result.data
-            logger.info(f"  {symbol}: {d['decision']} (conf={d['confidence']}%) — {d['reasoning']}")
-
-            if d["decision"] != "BUY":
-                continue
-            if symbol in open_symbols:
-                logger.info(f"  → {symbol}: position already open, skipping")
-                continue
-            if not d.get("entry_price") or not d.get("position_size"):
+        for pm in list_pms(active_only=True):
+            pm_id = pm["pm_id"]
+            watchlist = get_pm_watchlist(pm_id, config)
+            if not watchlist:
+                logger.info(f"  PM{pm_id}: empty watchlist, skipping")
                 continue
 
-            trade = executor.execute_trade(
-                symbol=symbol,
-                entry_price=d["entry_price"],
-                stop_loss=d["stop_loss"],
-                target=d["target"],
-                position_size=d["position_size"],
-                reasoning=d["reasoning"],
-                signals=d.get("agent_scores"),
-            )
-            open_symbols.add(symbol)  # prevent double-entry within the same run
-            alerter.trade_alert(symbol, "BUY", d["entry_price"],
-                                d["stop_loss"], d["target"], d["confidence"])
-            logger.info(f"  Trade executed: {trade}")
+            # Each PM uses its own MasterAgent instance (which may be overridden in pm_<id>/agents/)
+            try:
+                import importlib.util as _ilu
+                pm_master_path = _Path(f"pm_{pm_id}/agents/master.py")
+                if pm_master_path.exists():
+                    spec = _ilu.spec_from_file_location(f"pm_{pm_id}.agents.master", pm_master_path)
+                    mod = _ilu.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    master = mod.MasterAgent(config)
+                else:
+                    master = MasterAgent(config)
+                master.pm_id = pm_id
+            except Exception as _e:
+                logger.warning(f"PM{pm_id} MasterAgent load failed ({_e}), using default")
+                master = MasterAgent(config)
+                master.pm_id = pm_id
+
+            executor = ExecutionAgent(config)
+            pm_open = set()  # track within this PM's run
+
+            for symbol in watchlist:
+                if symbol in open_symbols:
+                    continue
+                result = master.run_for_stock(symbol)
+                if not result.ok():
+                    continue
+                d = result.data
+                logger.info(f"  PM{pm_id} {symbol}: {d['decision']} (conf={d['confidence']}%) — {d['reasoning']}")
+
+                if d["decision"] != "BUY" or symbol in pm_open:
+                    continue
+                if not d.get("entry_price") or not d.get("position_size"):
+                    continue
+
+                trade = executor.execute_trade(
+                    symbol=symbol,
+                    entry_price=d["entry_price"],
+                    stop_loss=d["stop_loss"],
+                    target=d["target"],
+                    position_size=d["position_size"],
+                    reasoning=d["reasoning"],
+                    signals=d.get("agent_scores"),
+                    pm_id=pm_id,
+                )
+                pm_open.add(symbol)
+                open_symbols.add(symbol)
+                alerter.trade_alert(symbol, "BUY", d["entry_price"],
+                                    d["stop_loss"], d["target"], d["confidence"])
+                logger.info(f"  PM{pm_id} trade executed: {trade}")
     except Exception as e:
         logger.error(f"Trade execution failed: {e}")
 
 
 def job_intraday_scan():
     """Run intraday pattern scanner — fires every 5 min during market hours."""
-    now = datetime.now()
+    from zoneinfo import ZoneInfo
+    now = datetime.now(tz=ZoneInfo("Asia/Kolkata"))
     # Only run during market hours 9:15 AM - 3:00 PM IST
     if not (9 * 60 + 15 <= now.hour * 60 + now.minute <= 15 * 60):
         return
@@ -311,13 +364,25 @@ def job_monitor_positions():
     try:
         import sqlite3 as _sqlite3
         from pathlib import Path as _Path
-        from agents.execution_agent import ExecutionAgent
+        from agents.execution_agent import ExecutionAgent, today_pnl_pct
         from agents.news_agent import NewsAgent
         from core.alerts import TelegramAlerter
         config = _load_config()
         executor = ExecutionAgent(config)
         news_agent = NewsAgent(config)
         alerter = TelegramAlerter()
+
+        # P&L limit proximity alert (fire at 75% of daily limit)
+        capital = config.get("trading", {}).get("capital", 10000)
+        max_loss_pct = config.get("risk", {}).get("max_loss_per_day_pct", 3.0)
+        import core.scheduler as _self
+        current_pnl_pct = _self.today_pnl_pct(capital)
+        threshold = -max_loss_pct * 0.75
+        if current_pnl_pct <= threshold:
+            alerter.send(
+                f"⚠️ P&L ALERT: Daily P&L at {current_pnl_pct:.1f}% "
+                f"(limit: -{max_loss_pct:.1f}%, threshold: {threshold:.1f}%)"
+            )
 
         # Check SL/target
         closed = executor.monitor_positions()

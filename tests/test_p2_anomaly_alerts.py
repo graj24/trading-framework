@@ -90,7 +90,8 @@ class TestPreOpenZeroResultsAlert:
         sys.modules["core.alerts"] = fake_alerts
         try:
             with patch.object(sched, "_load_config", return_value=_config()):
-                sched.job_preopen_scan()
+                with patch("core.holidays.is_trading_day", return_value=True):
+                    sched.job_preopen_scan()
         finally:
             for k, v in orig.items():
                 if v is None:
@@ -164,7 +165,9 @@ class TestPnlLimitAlert:
         sys.modules["core.watchlist"] = fake_watchlist
         try:
             with patch.object(sched, "_load_config", return_value=cfg):
-                sched.job_monitor_positions()
+                # Patch today_pnl_pct at the scheduler level since it's imported lazily
+                with patch("core.scheduler.today_pnl_pct", lambda capital, db_path=None: pnl_pct):
+                    sched.job_monitor_positions()
         finally:
             for k, v in orig.items():
                 if v is None:

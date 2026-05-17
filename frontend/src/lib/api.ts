@@ -37,6 +37,7 @@ export const api = {
     }),
   testService: (service: string) =>
     req<{ status: string; error?: string }>(`/api/env/test/${service}`, { method: "POST" }),
+  servicesHealth: () => req<Record<string, ServiceHealth>>("/api/services/health"),
   infra: () => req<InfraStatus>("/api/infra"),
   pms: () => req<PMSummary[]>("/api/pms"),
   pmState: (id: string) => req<PMState>(`/api/pms/${id}/state`),
@@ -60,6 +61,12 @@ export const api = {
     req<{ paused: boolean }>(`/api/pms/${id}/resume`, { method: "POST" }),
   pmPausedStatus: (id: string) =>
     req<{ paused: boolean; reason: string }>(`/api/pms/${id}/paused`),
+  leaderboard: (windowDays = 30) =>
+    req<LeaderboardEntry[]>(`/api/pms/leaderboard?window_days=${windowDays}`),
+  pmStrategies: (id: string) =>
+    req<{ pm_id: string; active_version: number | null; versions: StrategyVersion[] }>(`/api/pms/${id}/strategies`),
+  pmStrategyDiff: (id: string, vA: number, vB: number) =>
+    req<{ diff: string }>(`/api/pms/${id}/strategies/diff?v_a=${vA}&v_b=${vB}`),
 };
 
 // Types
@@ -213,4 +220,35 @@ export async function* streamBacktest(
       if (line.trim()) yield JSON.parse(line);
     }
   }
+}
+
+export interface LeaderboardEntry {
+  pm_id: string;
+  total_pnl: number;
+  n_trades: number;
+  win_rate_pct: number;
+  sharpe: number;
+  max_drawdown_inr: number;
+  open_positions: number;
+  window_days: number;
+}
+
+export interface StrategyVersion {
+  version: number;
+  created_at: string;
+  notes: string;
+  parent_version: number | null;
+  file: string;
+}
+
+export interface ServiceHealth {
+  status: "ok" | "error" | "degraded" | "unconfigured" | "not_required";
+  latency_ms?: number;
+  error?: string;
+  fix?: string;
+  detail?: string;
+  sample?: string;
+  model?: string;
+  bot?: string;
+  user?: string;
 }

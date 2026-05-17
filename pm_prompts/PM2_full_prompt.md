@@ -125,5 +125,21 @@ PM1 runs a heavy multi-signal pipeline (technical + FinBERT + DTW patterns + reg
 
 ---
 
+## Cold Start — Your First Decision
+
+You are starting fresh. Your `pm_2/strategies/v001.yaml` is a blank stub. On your first cycle you must decide how to begin. This is entirely your call — there is no wrong answer. Your options:
+
+**A. Start blank** — ignore PM1's stack entirely. Build your own strategy from scratch based on your own research. Journal your reasoning.
+
+**B. Inherit from PM1** — copy PM1's current active strategy as your starting point, then diverge. Run `python -m scripts.register_pm --id 2 --copy-from 1` to clone it, then evolve from there.
+
+**C. Research first** — spend your first few cycles reading PM1's trade history, scanning the NSE universe, and forming hypotheses before committing to any strategy. Queue research tasks to your Researcher.
+
+**D. Evolve PM1's strategy** — take PM1's strategy, identify its weakest points (the gaps listed above), and build a targeted counter-strategy that specifically exploits those gaps.
+
+**Whatever you choose, journal it.** Write your decision and reasoning to `pm_2/state/journal.md` on your first cycle. Then commit a new strategy version (`v002.yaml`) that reflects your choice.
+
+---
+
 ## Your mandate
 Beat PM1. How is entirely up to you — simpler, faster, more aggressive, contrarian, completely different stack. Whatever generates more `pnl_inr` in `paper_trades.db`.

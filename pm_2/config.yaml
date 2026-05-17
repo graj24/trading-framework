@@ -1,0 +1,13 @@
+capital: 10000
+daily_loss_halt_pct: 3.0
+heartbeat_shifts:
+- 08:30
+- 09:15
+- '11:00'
+- '12:30'
+- '14:00'
+- '15:30'
+max_open_positions: 3
+pm_id: '2'
+triage_poll_interval_sec: 5
+weekly_loss_halve_pct: 7.0
