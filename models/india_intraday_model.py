@@ -30,6 +30,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from core import features as F
+
 warnings.filterwarnings("ignore")
 
 DATA_DIR   = Path(__file__).parent / "stocks_1h"
@@ -48,15 +50,7 @@ NIFTY50_TICKERS = [to_yfinance_ticker(s) for s in NIFTY_50]
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _ema(s, n): return s.ewm(span=n, adjust=False).mean()
-def _rsi(s, n=14):
-    d = s.diff()
-    g = d.clip(lower=0).ewm(alpha=1/n, min_periods=n).mean()
-    l = (-d.clip(upper=0)).ewm(alpha=1/n, min_periods=n).mean()
-    return 100 - 100 / (1 + g / l.replace(0, np.nan))
-def _atr(h, l, c, n=14):
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/n, min_periods=n).mean()
+# Indicators: see core/features.py. Use F.ema, F.rsi, F.atr.
 
 def _fo_expiry_days(index: pd.DatetimeIndex) -> pd.Series:
     """Days until next monthly F&O expiry (last Thursday of month, with
@@ -165,12 +159,11 @@ def build_features(df: pd.DataFrame, nifty: pd.Series, banknifty: pd.Series, vix
                             for i in range(len(c))]
 
     # ── Momentum ──────────────────────────────────────────────────────────────
-    feat["rsi_14"]    = _rsi(c, 14)
-    feat["rsi_6"]     = _rsi(c, 6)
-    macd = _ema(c, 12) - _ema(c, 26)
-    feat["macd_hist"] = macd - _ema(macd, 9)
-    feat["ema9_ratio"]  = c / _ema(c, 9) - 1
-    feat["ema21_ratio"] = c / _ema(c, 21) - 1
+    feat["rsi_14"]    = F.rsi(c, 14)
+    feat["rsi_6"]     = F.rsi(c, 6)
+    feat["macd_hist"] = F.macd_hist(c)
+    feat["ema9_ratio"]  = c / F.ema(c, 9) - 1
+    feat["ema21_ratio"] = c / F.ema(c, 21) - 1
 
     # ── Volume ────────────────────────────────────────────────────────────────
     # Volume ratio vs same-hour average (captures morning spike vs afternoon lull)
@@ -179,7 +172,7 @@ def build_features(df: pd.DataFrame, nifty: pd.Series, banknifty: pd.Series, vix
     feat["vol_ratio_20"]   = v / (v.rolling(20).mean() + 1)
 
     # ── Volatility ────────────────────────────────────────────────────────────
-    atr = _atr(h, l, c, 14)
+    atr = F.atr(h, l, c, 14)
     feat["atr_pct"]        = atr / c * 100
     feat["intraday_range"] = (h - l) / c * 100
     feat["hvol_20h"]       = c.pct_change().rolling(20).std() * np.sqrt(252 * 6) * 100

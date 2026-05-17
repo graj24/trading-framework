@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from core import features as F
+
 warnings.filterwarnings("ignore")
 
 MODEL_PATH = Path("stocks/ml_signal_model.pkl")
@@ -45,42 +47,8 @@ SECTOR_INDICES = {
 
 # ── Indicator helpers ─────────────────────────────────────────────────────────
 
-def _ema(s, n): return s.ewm(span=n, adjust=False).mean()
-
-def _rsi(s, n=14):
-    d = s.diff()
-    g = d.clip(lower=0).ewm(alpha=1/n, min_periods=n).mean()
-    l = (-d.clip(upper=0)).ewm(alpha=1/n, min_periods=n).mean()
-    return 100 - 100 / (1 + g / l.replace(0, np.nan))
-
-def _macd_hist(s):
-    m = _ema(s, 12) - _ema(s, 26)
-    return m - _ema(m, 9)
-
-def _atr(h, l, c, n=14):
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/n, min_periods=n).mean()
-
-def _stoch(h, l, c, k=14):
-    lo = l.rolling(k).min()
-    hi = h.rolling(k).max()
-    return (c - lo) / (hi - lo + 1e-9) * 100
-
-def _obv(c, v):
-    return (np.sign(c.diff()).fillna(0) * v).cumsum()
-
-def _bb_position(c, n=20):
-    sma = c.rolling(n).mean()
-    std = c.rolling(n).std()
-    return (c - (sma - 2*std)) / (4*std + 1e-9)   # 0=lower band, 1=upper band
-
-def _bb_width(c, n=20):
-    sma = c.rolling(n).mean()
-    std = c.rolling(n).std()
-    return (4 * std) / (sma + 1e-9)
-
-def _hist_vol(c, n):
-    return c.pct_change().rolling(n).std() * np.sqrt(252)
+# Indicators: see core/features.py. Use F.ema, F.rsi, F.macd_hist, F.atr,
+# F.stoch_k, F.obv, F.bb_position, F.bb_width, F.hist_vol.
 
 # ── Feature engineering ───────────────────────────────────────────────────────
 
@@ -94,36 +62,36 @@ def build_features(df: pd.DataFrame, market_data: dict[str, pd.Series]) -> pd.Da
     for n in [1, 3, 5, 10, 20]:
         feat[f"ret_{n}d"] = c.pct_change(n) * 100
 
-    feat["ema20_ratio"]  = c / _ema(c, 20) - 1
-    feat["ema50_ratio"]  = c / _ema(c, 50) - 1
-    feat["ema200_ratio"] = c / _ema(c, 200) - 1
-    feat["ema20_50_cross"] = (_ema(c, 20) / _ema(c, 50) - 1) * 100
+    feat["ema20_ratio"]  = c / F.ema(c, 20) - 1
+    feat["ema50_ratio"]  = c / F.ema(c, 50) - 1
+    feat["ema200_ratio"] = c / F.ema(c, 200) - 1
+    feat["ema20_50_cross"] = (F.ema(c, 20) / F.ema(c, 50) - 1) * 100
 
-    feat["bb_position"] = _bb_position(c)
-    feat["bb_width"]    = _bb_width(c)
+    feat["bb_position"] = F.bb_position(c)
+    feat["bb_width"]    = F.bb_width(c)
 
-    atr = _atr(h, l, c)
+    atr = F.atr(h, l, c)
     feat["atr_pct"]     = atr / c * 100
 
     # ── Momentum ──────────────────────────────────────────────────────────────
-    feat["rsi_7"]       = _rsi(c, 7)
-    feat["rsi_14"]      = _rsi(c, 14)
-    feat["rsi_21"]      = _rsi(c, 21)
-    feat["macd_hist"]   = _macd_hist(c)
-    feat["stoch_k"]     = _stoch(h, l, c)
+    feat["rsi_7"]       = F.rsi(c, 7)
+    feat["rsi_14"]      = F.rsi(c, 14)
+    feat["rsi_21"]      = F.rsi(c, 21)
+    feat["macd_hist"]   = F.macd_hist(c)
+    feat["stoch_k"]     = F.stoch_k(h, l, c)
     for n in [5, 10, 20]:
         feat[f"roc_{n}d"] = (c / c.shift(n) - 1) * 100
 
     # ── Volume ────────────────────────────────────────────────────────────────
     vol_avg20 = v.rolling(20).mean()
     feat["vol_ratio"]   = v / vol_avg20
-    obv = _obv(c, v)
+    obv = F.obv(c, v)
     feat["obv_trend"]   = (obv / obv.shift(5) - 1) * 100   # 5-day OBV change
     feat["vpt"]         = (c.pct_change() * v).cumsum() / 1e6  # volume-price trend
 
     # ── Volatility ────────────────────────────────────────────────────────────
     for n in [5, 10, 20]:
-        feat[f"hvol_{n}d"] = _hist_vol(c, n) * 100
+        feat[f"hvol_{n}d"] = F.hist_vol(c, n) * 100
 
     # ── Gap ───────────────────────────────────────────────────────────────────
     feat["gap_pct"]     = (df["Open"] / c.shift(1) - 1) * 100

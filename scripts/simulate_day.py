@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from core.logger import setup_logging
 from core.costs import BROKERAGE_FRAC as BROKERAGE
+from core import features as F
 
 load_dotenv()
 with open("config.yaml") as f:
@@ -98,27 +99,20 @@ print(f"  Previous Volume  : {prev_volume:,.0f} ({prev_volume/avg_volume_20d:.1f
 
 # Technical state at T-1
 close = hist_data["Close"]
-ema20  = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
-ema50  = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
-ema200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
+ema20  = float(F.ema(close, 20).iloc[-1])
+ema50  = float(F.ema(close, 50).iloc[-1])
+ema200 = float(F.ema(close, 200).iloc[-1])
 
-delta = close.diff()
-gain = delta.clip(lower=0).rolling(14).mean()
-loss = (-delta.clip(upper=0)).rolling(14).mean()
-rs = gain / loss.replace(0, np.nan)
-rsi = float((100 - 100 / (1 + rs)).iloc[-1])
+# Stage 0: canonical Wilder's RSI (was SMA-based here previously).
+rsi = float(F.rsi(close).iloc[-1])
 
-ema12 = close.ewm(span=12, adjust=False).mean()
-ema26 = close.ewm(span=26, adjust=False).mean()
-macd = ema12 - ema26
-signal_line = macd.ewm(span=9, adjust=False).mean()
-macd_signal = "bullish" if float(macd.iloc[-1]) > float(signal_line.iloc[-1]) else "bearish"
+macd_line, signal_line, _ = F.macd(close)
+macd_signal = "bullish" if float(macd_line.iloc[-1]) > float(signal_line.iloc[-1]) else "bearish"
 
 # ATR
 high = hist_data["High"]
 low  = hist_data["Low"]
-tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-atr = float(tr.rolling(14).mean().iloc[-1])
+atr = float(F.atr(high, low, close).iloc[-1])
 
 # 20-day return
 ret_20d = (prev_close - float(close.iloc[-21])) / float(close.iloc[-21]) * 100 if len(close) > 21 else 0
