@@ -1,19 +1,20 @@
 import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, GitBranch, Users, FlaskConical,
-  RotateCcw, Settings, Server,
+  RotateCcw, Settings, Server, Trophy,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { Tooltip } from "@/components/ui/Tooltip";
 
 const NAV = [
-  { to: "/",         label: "Terminal",  Icon: LayoutDashboard },
-  { to: "/pipeline", label: "Pipeline",  Icon: GitBranch },
-  { to: "/pms",      label: "PMs",       Icon: Users },
-  { to: "/backtest", label: "Backtest",  Icon: FlaskConical },
-  { to: "/replay",   label: "Replay",    Icon: RotateCcw },
-  { to: "/setup",    label: "Setup",     Icon: Settings },
-  { to: "/infra",    label: "Infra",     Icon: Server },
+  { to: "/",           label: "Terminal",    Icon: LayoutDashboard },
+  { to: "/pipeline",   label: "Pipeline",    Icon: GitBranch },
+  { to: "/pms",        label: "PMs",         Icon: Users },
+  { to: "/leaderboard",label: "Leaderboard", Icon: Trophy },
+  { to: "/backtest",   label: "Backtest",    Icon: FlaskConical },
+  { to: "/replay",     label: "Replay",      Icon: RotateCcw },
+  { to: "/setup",      label: "Setup",       Icon: Settings },
+  { to: "/infra",      label: "Infra",       Icon: Server },
 ];
 
 export function Sidebar() {

@@ -179,13 +179,15 @@ Decide what to do this cycle. Return ONLY valid JSON:
         )
 
     def _handle_evolve(self, details: dict, state: dict):
-        """Ask LLM to propose a strategy diff and commit if it looks better."""
+        """Ask LLM to propose a strategy diff, backtest it, commit if Sharpe improves."""
         hypothesis = details.get("hypothesis", "")
         if not hypothesis:
             return
         try:
             import litellm
             from common.strategy.registry import commit_new_version, load_active, get_active_version
+            from common.strategy.backtest_gate import backtest_strategy
+
             current = load_active(self.pm_id) or {}
             current_ver = get_active_version(self.pm_id)
 
@@ -211,19 +213,33 @@ Return ONLY valid JSON."""
                 if raw.startswith("json"):
                     raw = raw[4:]
             new_strategy = json.loads(raw)
-            new_ver = commit_new_version(
-                self.pm_id, new_strategy,
-                parent_version=current_ver,
-                notes=hypothesis[:200],
-            )
-            logger.info(f"PM{self.pm_id} strategy evolved: v{current_ver} → v{new_ver}")
-            from common.core.event_bus import get_bus
-            get_bus().publish(
-                f"strategy.update.{self.pm_id}",
-                {"from_version": current_ver, "to_version": new_ver, "hypothesis": hypothesis},
-                pm_id=self.pm_id,
-                severity="INFO",
-            )
+
+            # Backtest gate: only commit if new Sharpe >= current Sharpe
+            current_bt = backtest_strategy(current)
+            new_bt = backtest_strategy(new_strategy)
+            current_sharpe = current_bt["sharpe"]
+            new_sharpe = new_bt["sharpe"]
+
+            if new_sharpe >= current_sharpe or current_bt["n_trades"] == 0:
+                new_ver = commit_new_version(
+                    self.pm_id, new_strategy,
+                    parent_version=current_ver,
+                    notes=f"{hypothesis[:200]} | backtest: sharpe {current_sharpe:.2f}→{new_sharpe:.2f}",
+                )
+                logger.info(f"PM{self.pm_id} strategy evolved: v{current_ver}→v{new_ver} (sharpe {current_sharpe:.2f}→{new_sharpe:.2f})")
+                from common.core.event_bus import get_bus
+                get_bus().publish(
+                    f"strategy.update.{self.pm_id}",
+                    {"from_version": current_ver, "to_version": new_ver,
+                     "hypothesis": hypothesis, "sharpe_before": current_sharpe, "sharpe_after": new_sharpe},
+                    pm_id=self.pm_id, severity="INFO",
+                )
+            else:
+                logger.info(f"PM{self.pm_id} evolution rejected: sharpe {current_sharpe:.2f} → {new_sharpe:.2f} (no improvement)")
+                from common.core.pm_state import append_journal
+                append_journal(self.pm_id,
+                    f"**EVOLVE rejected** — hypothesis: {hypothesis[:100]} | "
+                    f"backtest sharpe {current_sharpe:.2f}→{new_sharpe:.2f} (no improvement)")
         except Exception as e:
             logger.warning(f"PM{self.pm_id} evolve failed: {e}")
 

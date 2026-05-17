@@ -30,25 +30,27 @@ def _load_config() -> dict:
 # ── Multica heartbeat ─────────────────────────────────────────────────────────
 
 def _multica_wakeup(pm_id: str, shift: str):
-    """POST a wakeup issue to Multica for the given PM."""
+    """Publish pm.wakeup event to the bus. Optionally also POST to Multica if token is set."""
     import requests
     from core.pm_state import build_wakeup_context
 
-    server = os.getenv("MULTICA_SERVER_URL", "http://13.232.42.85:8080")
+    # Always publish to event bus — strategist daemon subscribes to this
+    try:
+        from core.event_bus import get_bus
+        get_bus().publish(
+            f"pm.wakeup.{pm_id}",
+            {"trigger": "heartbeat", "shift": shift},
+            pm_id=pm_id,
+            severity="INFO",
+        )
+        logger.info(f"PM{pm_id} wakeup published to event bus [{shift}]")
+    except Exception as e:
+        logger.error(f"PM{pm_id} event bus wakeup failed: {e}")
+
+    # Optionally also notify Multica (for issue-based workflow)
+    server = os.getenv("MULTICA_SERVER_URL", "")
     token = os.getenv("MULTICA_TOKEN", "")
-    if not token:
-        logger.warning("MULTICA_TOKEN not set — skipping PM wakeup via Multica")
-        # Still publish to event bus so daemons can react
-        try:
-            from core.event_bus import get_bus
-            get_bus().publish(
-                f"pm.wakeup.{pm_id}",
-                {"trigger": "heartbeat", "shift": shift},
-                pm_id=pm_id,
-                severity="INFO",
-            )
-        except Exception:
-            pass
+    if not server or not token:
         return
 
     context = build_wakeup_context(pm_id, shift=shift)
@@ -66,11 +68,11 @@ def _multica_wakeup(pm_id: str, shift: str):
             timeout=10,
         )
         if resp.status_code in (200, 201):
-            logger.info(f"PM{pm_id} wakeup issued via Multica [{shift}]")
+            logger.info(f"PM{pm_id} wakeup also issued via Multica [{shift}]")
         else:
             logger.warning(f"Multica wakeup failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
-        logger.error(f"Multica wakeup error: {e}")
+        logger.debug(f"Multica wakeup error (non-critical): {e}")
 
 
 def job_pm_heartbeat(shift: str):
