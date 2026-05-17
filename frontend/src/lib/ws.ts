@@ -10,7 +10,8 @@ export type LiveEvent =
 
 type Handler = (event: LiveEvent) => void;
 
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws/live";
+const _proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+const WS_URL = import.meta.env.VITE_WS_URL || `${_proto}//${window.location.host}/ws/live`;
 
 class WSClient {
   private ws: WebSocket | null = null;
