@@ -139,7 +139,7 @@ Add columns to `trades`:
 At post-market, group P&L by `signal_source` and produce a per-signal hit-rate. This is essential before deciding which signals deserve more weight.
 
 ### 20. Holiday-aware F&O expiry. *(0.5d)*
-Maps to B11. Bundle the NSE holiday list (`stocks_1h/_holidays.json`) and adjust `_fo_expiry_days`. Retrain `india_intraday_model.pkl`.
+Maps to B11. Bundle the NSE holiday list (`models/stocks_1h/_holidays.json`) and adjust `_fo_expiry_days`. Retrain `india_intraday_model.pkl`.
 
 ### 21. Live-vs-paper parity check. *(2d)*
 Even before real-money trading: shadow-mode. Send the same orders through `PaperBroker` and `ZerodhaBroker` with `mode="paper"` flag bypassing the actual `place_order`. Compare predicted fills to actual quote depth. Detect divergence early.
@@ -148,7 +148,7 @@ Even before real-money trading: shadow-mode. Send the same orders through `Paper
 Maps to D-side concerns. The 11-files-per-stock model is great for inspection but will hit FS overhead at >200 stocks or in containers with slow disks. DuckDB over parquet is a drop-in compromise (you keep parquet inspectability).
 
 ### 23. Promotion gate for ML retraining. *(1d)*
-Today `python ml_model.py train` overwrites the pickled model in place. A model with worse out-of-sample AUC than the previous one will silently downgrade signals. Add:
+Today `python models/ml_model.py train` overwrites the pickled model in place. A model with worse out-of-sample AUC than the previous one will silently downgrade signals. Add:
 ```python
 # train.py
 if new_auc - old_auc < 0.01:

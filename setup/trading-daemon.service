@@ -1,0 +1,18 @@
+[Unit]
+Description=Trading Framework Scheduler
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/app
+EnvironmentFile=/app/.env
+ExecStart=/app/.venv/bin/python main.py --schedule
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/app/logs/daemon.log
+StandardError=append:/app/logs/daemon.log
+
+[Install]
+WantedBy=multi-user.target

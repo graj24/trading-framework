@@ -28,7 +28,7 @@ python -m agents.data_agent build RELIANCE      # smoke test
 python main.py
 
 # Or open the dashboard (read-only)
-streamlit run dashboard.py
+streamlit run scripts/dashboard.py
 ```
 
 For the full walkthrough see [`docs/user-guide.md`](docs/user-guide.md).
@@ -57,6 +57,7 @@ trading-framework/
 │   ├── discovery_agent.py      # NSE / MoneyControl / Twitter scrape
 │   ├── pre_open_monitor.py     # gap-up / gap-down 09:00 IST
 │   ├── intraday_scanner.py     # 6-pattern intraday detector
+│   ├── sector_rotation_agent.py # relative-strength sector signal
 │   └── earnings_calendar_agent.py
 │
 ├── core/                       # shared infrastructure
@@ -67,9 +68,34 @@ trading-framework/
 │   ├── alerts.py               # Telegram alerter
 │   ├── logger.py               # rotating file + console
 │   ├── backtester.py           # event-driven backtester
+│   ├── replay.py               # event-driven replay engine
 │   ├── costs.py                # canonical slippage / brokerage / STT
 │   ├── row_utils.py            # sqlite3.Row.get() helper
-│   └── watchlist.py            # core_watchlist + dynamic merge
+│   ├── watchlist.py            # core_watchlist + dynamic merge
+│   ├── symbols.py              # NSE symbol helpers
+│   ├── holidays.py             # NSE holiday calendar
+│   ├── timing.py               # market-hours helpers
+│   ├── retry.py                # HTTP retry / backoff
+│   ├── concurrency.py          # thread-pool helpers
+│   ├── config.py               # config loader
+│   ├── bse_scrip.py            # BSE scrip master lookup
+│   └── duckdb_store.py         # DuckDB analytics store
+│
+├── api/                        # FastAPI REST + WebSocket backend
+│   ├── main.py                 # app factory, CORS, static file serving
+│   ├── deps.py                 # shared dependencies
+│   ├── routers/                # trades, signals, market, config, backtest,
+│   │   └── ...                 #   agents, candles, ws
+│   └── schemas/                # Pydantic request/response models
+│
+├── frontend/                   # React + TypeScript UI ("Bloomberg Terminal")
+│   ├── src/
+│   │   ├── pages/              # Terminal, Pipeline, Backtest, Replay, Setup
+│   │   ├── components/         # TopBar, Sidebar, AlertBanner, charts
+│   │   ├── store/              # Zustand state
+│   │   └── hooks/              # useWebSocket, etc.
+│   ├── dist/                   # built output (served by FastAPI)
+│   └── package.json
 │
 ├── ripple/                     # sentiment subsystem
 │   ├── sentiment_analyzer.py   # FinBERT + BART summariser
@@ -77,15 +103,21 @@ trading-framework/
 │   ├── pipeline.py
 │   └── config.py
 │
-├── ml_model.py                 # daily classifier (5d, +1.5%)
-├── india_intraday_model.py     # 1h classifier (3h, +1.0%)
+├── models/
+│   ├── ml_model.py             # daily classifier (5d, +1.5%)
+│   ├── india_intraday_model.py # 1h classifier (3h, +1.0%)
+│   └── stocks_1h/              # 1h candles + intraday model.pkl
 │
-├── dashboard.py                # Streamlit UI
-├── simulate_day.py             # time-travel a historical big-move day
-├── test_stock.py               # full-pipeline single-stock demo
-├── fetch_universe.py           # multi-exchange data downloader
-├── backtest_gap.py             # gap-strategy backtest
-├── backtest_intraday.py        # intraday-ML backtest
+├── scripts/
+│   ├── dashboard.py            # Streamlit UI (read-only, 5 tabs)
+│   ├── simulate_day.py         # time-travel a historical big-move day
+│   ├── fetch_universe.py       # multi-exchange data downloader
+│   ├── backtest_gap.py         # gap-strategy backtest
+│   └── backtest_intraday.py    # intraday-ML backtest
+│
+├── ui/                         # Streamlit multi-page app (setup + how-it-works)
+│   ├── app.py
+│   └── pages/
 │
 ├── docs/                       # project documentation (start here)
 │   ├── README.md
@@ -93,12 +125,10 @@ trading-framework/
 │   ├── technical-reference.md  # OFFICIAL — APIs, schemas, ops
 │   └── analysis/               # internal: architecture, issues, roadmap
 │
-├── docs-verification/          # findings + implementation logs (working notes)
-├── tests/                      # pytest suite (41+ tests)
+├── tests/                      # pytest suite (34 tests)
+├── setup/                      # AWS deployment scripts and configs
 │
 ├── stocks/<SYM>/               # per-stock KB (parquet + JSON)
-├── stocks_1h/                  # 1h candles + intraday model.pkl
-├── data/dynamic_watchlist.json # auto-discovered symbols
 ├── paper_trades.db             # SQLite trade ledger
 └── logs/                       # rotating logs
 ```
@@ -193,7 +223,7 @@ The full schema is documented in [`docs/technical-reference.md`](docs/technical-
 
 ```bash
 pip install pytest      # already in requirements.txt
-python -m pytest        # 41+ tests
+python -m pytest        # 34 tests
 ```
 
 Tests live in `tests/` with one file per fix (`test_crit1_*.py`, `test_high5_*.py`, …). All pure unit — no network, no real LLM, no real broker calls.

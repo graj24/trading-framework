@@ -65,7 +65,7 @@ flowchart TB
   subgraph Storage["Storage"]
     KB[(stocks/&lt;SYM&gt;/<br/>JSON+parquet)]
     DB[(paper_trades.db<br/>SQLite)]
-    H1[(stocks_1h/<br/>parquet+pkl)]
+    H1[(models/stocks_1h/<br/>parquet+pkl)]
   end
 
   M --> MA
@@ -115,6 +115,7 @@ trading-framework/
 │   ├── discovery_agent.py
 │   ├── pre_open_monitor.py
 │   ├── intraday_scanner.py
+│   ├── sector_rotation_agent.py
 │   └── earnings_calendar_agent.py
 │
 ├── core/                            # Shared infrastructure
@@ -124,7 +125,32 @@ trading-framework/
 │   ├── groww_client.py              # Groww live data client
 │   ├── alerts.py                    # Telegram alerter
 │   ├── logger.py                    # Rotating file + console logger
-│   └── backtester.py                # Event-driven backtester
+│   ├── backtester.py                # Event-driven backtester
+│   ├── replay.py                    # Event-driven replay engine
+│   ├── costs.py                     # Canonical slippage/brokerage/STT
+│   ├── row_utils.py                 # sqlite3.Row.get() helper
+│   ├── watchlist.py                 # core_watchlist + dynamic merge
+│   ├── symbols.py                   # NSE symbol helpers
+│   ├── holidays.py                  # NSE holiday calendar
+│   ├── timing.py                    # Market-hours helpers
+│   ├── retry.py                     # HTTP retry/backoff
+│   ├── concurrency.py               # Thread-pool helpers
+│   ├── config.py                    # Config loader
+│   ├── bse_scrip.py                 # BSE scrip master lookup
+│   └── duckdb_store.py              # DuckDB analytics store
+│
+├── api/                             # FastAPI REST + WebSocket backend
+│   ├── main.py                      # App factory, CORS, static file serving
+│   ├── deps.py
+│   ├── routers/                     # trades, signals, market, config,
+│   │   └── ...                      #   backtest, agents, candles, ws
+│   └── schemas/                     # Pydantic models
+│
+├── frontend/                        # React + TypeScript UI
+│   ├── src/pages/                   # Terminal, Pipeline, Backtest, Replay, Setup
+│   ├── src/components/
+│   ├── dist/                        # Built output (served by FastAPI)
+│   └── package.json
 │
 ├── ripple/                          # Sentiment subsystem
 │   ├── sentiment_analyzer.py        # FinBERT + BART
@@ -132,15 +158,24 @@ trading-framework/
 │   ├── pipeline.py
 │   └── config.py
 │
-├── ml_model.py                      # Daily classifier (5d, 1.5%)
-├── india_intraday_model.py          # 1h classifier (3h, 1.0%)
+├── models/
+│   ├── ml_model.py                  # Daily classifier (5d, 1.5%)
+│   ├── india_intraday_model.py      # 1h classifier (3h, 1.0%)
+│   └── stocks_1h/                   # 1h candles + intraday model.pkl (models/stocks_1h/)
 │
-├── dashboard.py                     # Streamlit UI (5 tabs)
-├── simulate_day.py                  # Time-travel single-day replay
-├── test_stock.py                    # Full-pipeline single-stock demo
-├── fetch_universe.py                # Multi-exchange price downloader
-├── backtest_gap.py                  # Standalone gap-strategy backtest
-├── backtest_intraday.py             # Standalone intraday-ML backtest
+├── scripts/
+│   ├── dashboard.py                 # Streamlit UI (5 tabs, read-only)
+│   ├── simulate_day.py              # Time-travel single-day replay
+│   ├── fetch_universe.py            # Multi-exchange price downloader
+│   ├── backtest_gap.py              # Standalone gap-strategy backtest
+│   └── backtest_intraday.py         # Standalone intraday-ML backtest
+│
+├── ui/                              # Streamlit multi-page app
+│   ├── app.py
+│   └── pages/
+│
+├── tests/                           # pytest suite (34 tests)
+├── setup/                           # AWS deployment scripts and configs
 │
 ├── stocks/<SYM>/                    # Per-stock knowledge base
 │   ├── price_history.parquet
@@ -153,13 +188,6 @@ trading-framework/
 │   ├── news_history.json
 │   ├── patterns.json
 │   └── bulk_deals.json
-│
-├── stocks_1h/                       # 1h candles + intraday model
-│   ├── *.parquet
-│   ├── NIFTY_1h.parquet
-│   ├── BANKNIFTY_1h.parquet
-│   ├── VIX_1h.parquet
-│   └── india_intraday_model.pkl
 │
 ├── paper_trades.db                  # SQLite ledger
 └── logs/
@@ -382,18 +410,18 @@ class EarningsCalendarAgent(Agent):
 ### 5.12. ML modules
 
 ```python
-# ml_model.py (daily, 5-day forward, 1.5% threshold)
+# models/ml_model.py (daily, 5-day forward, 1.5% threshold)
 def train() -> None
 def predict(symbol: str) -> dict
 # Returns: {symbol, ml_signal: "BUY"|"HOLD"|"SKIP", ml_proba: float, confidence: float}
-# Model artefact: stocks/ml_signal_model.pkl
+# Model artefact: models/stocks_1h/../ml_signal_model.pkl
 
-# india_intraday_model.py (1h, 3h forward, 1.0% threshold)
-def fetch_all() -> None              # writes stocks_1h/<SYM>.parquet + index files
+# models/india_intraday_model.py (1h, 3h forward, 1.0% threshold)
+def fetch_all() -> None              # writes models/stocks_1h/<SYM>.parquet + index files
 def train() -> None
 def predict(symbol: str) -> dict
 def dynamic_threshold(vix, regime, hour, fo_days) -> float    # in [0.45, 0.80]
-# Model artefact: stocks_1h/india_intraday_model.pkl
+# Model artefact: models/stocks_1h/india_intraday_model.pkl
 ```
 
 ### 5.13. Core services
@@ -506,7 +534,7 @@ CREATE TABLE IF NOT EXISTS trades (
 
 `position_size` is INR notional. `pnl_inr = position_size × pnl_pct / 100` — i.e. it represents P&L on the **notional**, not on the rounded share quantity actually held. Slippage and brokerage are built into `pnl_pct` (`SLIPPAGE = 0.0005`, `BROKERAGE = 0.0003` per side).
 
-### 6.3. Hourly dataset (`stocks_1h/`)
+### 6.3. Hourly dataset (`models/stocks_1h/`)
 
 - `<SYM>.parquet` — 1h OHLCV for ~3 years per Nifty50 stock.
 - `NIFTY_1h.parquet`, `BANKNIFTY_1h.parquet`, `VIX_1h.parquet` — market context.
@@ -563,7 +591,7 @@ See `analysis/04-decision-pipeline.md` for the line-by-line walkthrough.
 
 ## 9. ML pipeline
 
-### 9.1. Features (daily — `ml_model.py`)
+### 9.1. Features (daily — `models/ml_model.py`)
 
 ~30 features:
 - Returns (1, 3, 5, 10, 20 day)
@@ -578,7 +606,7 @@ See `analysis/04-decision-pipeline.md` for the line-by-line walkthrough.
 
 Label: `1` if next-5-day return > +1.5%.
 
-### 9.2. Features (1h — `india_intraday_model.py`)
+### 9.2. Features (1h — `models/india_intraday_model.py`)
 
 ~30 features:
 - Time-of-day flags (hour, mins_to_close, is_morning, is_midday, is_power_hour)
@@ -689,7 +717,8 @@ From `requirements.txt` (key picks; full list in repo):
 - Single Python process per role:
   - `python main.py`              — interactive single cycle
   - `python main.py --schedule`   — long-running daemon
-  - `streamlit run dashboard.py`  — UI (read-only)
+  - `streamlit run scripts/dashboard.py`  — Streamlit UI (read-only)
+  - `bash start_ui.sh`            — FastAPI backend + React UI (Bloomberg Terminal)
 - Daemon is single-threaded by APScheduler default executor.
 
 ### 14.2. Failure modes
@@ -702,12 +731,12 @@ From `requirements.txt` (key picks; full list in repo):
 ### 14.3. Restart semantics
 - KB is durable on disk; resume is safe.
 - `paper_trades.db` is durable; open positions persist across restarts.
-- 1h dataset cache is durable; if missing, run `python india_intraday_model.py fetch`.
+- 1h dataset cache is durable; if missing, run `python models/india_intraday_model.py fetch`.
 
 ### 14.4. Backup recommendations
 - `paper_trades.db` — daily.
 - `stocks/` — weekly (regenerable, but expensive).
-- `stocks_1h/india_intraday_model.pkl` — keep last 3 (no rollback today).
+- `models/models/stocks_1h/india_intraday_model.pkl` — keep last 3 (no rollback today).
 
 ---
 

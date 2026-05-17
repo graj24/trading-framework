@@ -218,7 +218,7 @@ No ruff/black/isort. Style varies across files.
 
 These are not "bugs" but are worth examining:
 
-- **Survivorship bias.** ML training uses today's NIFTY 50 over 3 years of intraday history. Stocks dropped from the index are gone from `stocks_1h/`. Backtest win-rates are biased upward.
+- **Survivorship bias.** ML training uses today's NIFTY 50 over 3 years of intraday history. Stocks dropped from the index are gone from `models/stocks_1h/`. Backtest win-rates are biased upward.
 - **Label leakage.** Both ML models use `future_return > threshold`. Features are computed at time `t`; labels at `t + horizon`. As long as `dropna().iloc[:-FORWARD_DAYS]` is honoured (it is), this is okay — but verify on every data shape change.
 - **Regime classifier uses NIFTY only.** A stock-specific regime would be more useful for bear/range stocks within a bull market. (See `06-improvements.md`.)
 - **No portfolio P&L attribution.** P&L is per trade; you can't tell which signals (technical, ML, gap, pattern) contributed.

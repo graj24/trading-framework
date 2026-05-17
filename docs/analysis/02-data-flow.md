@@ -13,7 +13,7 @@ flowchart TB
     S["core/scheduler.py<br/>APScheduler IST"]
     T["test_stock.py SYMBOL"]
     SD["simulate_day.py SYMBOL [DATE]"]
-    DASH["streamlit run dashboard.py"]
+    DASH["streamlit run scripts/dashboard.py"]
     BTG["backtest_gap.py"]
     BTI["backtest_intraday.py"]
   end
@@ -39,8 +39,8 @@ flowchart TB
   end
 
   subgraph ML["ML Models"]
-    MLD["ml_model.py<br/>(daily, 5d, 1.5%)"]
-    MLI["india_intraday_model.py<br/>(1h, 3h, 1.0%)"]
+    MLD["models/ml_model.py<br/>(daily, 5d, 1.5%)"]
+    MLI["models/india_intraday_model.py<br/>(1h, 3h, 1.0%)"]
     SENT["ripple/sentiment_analyzer<br/>FinBERT + BART summariser"]
   end
 
@@ -60,7 +60,7 @@ flowchart TB
 
   subgraph STORE["Persistent storage"]
     KBFS["stocks/&lt;SYM&gt;/<br/>JSON + parquet"]
-    H1["stocks_1h/<br/>parquet + .pkl"]
+    H1["models/stocks_1h/<br/>parquet + .pkl"]
     DB["paper_trades.db<br/>(SQLite)"]
     CFG["config.yaml"]
     ENV[".env"]

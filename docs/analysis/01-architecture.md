@@ -52,8 +52,8 @@ Everything else — data, news, technical, pattern, regime, risk, execution, lea
                                 │
 ┌────────────────────────────────────────────────────────────────────┐
 │  ML MODELS                  CORE SERVICES                           │
-│  ml_model.py (daily)        core/broker.py     (Paper / Zerodha)    │
-│  india_intraday_model.py    core/groww_client.py (live LTP/quotes)  │
+│  models/ml_model.py (daily) core/broker.py     (Paper / Zerodha)    │
+│  models/india_intraday_model core/groww_client.py (live LTP/quotes) │
 │  ripple/sentiment_analyzer  core/knowledge_base.py (per-stock JSON) │
 │    (FinBERT, ProsusAI)      core/alerts.py     (Telegram)           │
 │                             core/logger.py     (rotating file log)  │
@@ -61,9 +61,16 @@ Everything else — data, news, technical, pattern, regime, risk, execution, lea
 └────────────────────────────────────────────────────────────────────┘
                                 │
 ┌────────────────────────────────────────────────────────────────────┐
+│  API + UI                                                           │
+│  api/main.py (FastAPI)      — REST + WebSocket, serves frontend     │
+│  frontend/ (React/TS/Vite)  — Bloomberg Terminal UI (5 pages)       │
+│  scripts/dashboard.py       — legacy Streamlit UI (read-only)       │
+└────────────────────────────────────────────────────────────────────┘
+                                │
+┌────────────────────────────────────────────────────────────────────┐
 │  STORAGE                                                            │
 │  stocks/<SYM>/              — per-stock JSON KB + parquet history   │
-│  stocks_1h/                 — 1h candles + intraday model.pkl       │
+│  models/stocks_1h/           — 1h candles + intraday model.pkl       │
 │  paper_trades.db            — SQLite trade ledger                   │
 │  config.yaml                — runtime config (watchlist, risk, …)   │
 │  .env                       — secrets (Groww, Twitter, Telegram, …) │
@@ -117,8 +124,11 @@ APScheduler with `Asia/Kolkata` timezone. Cron + interval jobs (full schedule in
 | 15:45             | `job_prune_watchlist`       | Trim watchlist to `watchlist_max` (=20)                    |
 | 18:00–08:00, /30m | `job_earnings_overnight`    | NSE/BSE filings monitor                                    |
 
-### 4c. `streamlit run dashboard.py` — read-only UI
+### 4c. `streamlit run scripts/dashboard.py` — read-only UI
 Five tabs: Portfolio, Signals, Backtest (gap strategy), News, Intraday ML. Reads `paper_trades.db` and per-stock KB; **does not** execute trades.
+
+### 4d. `bash start_ui.sh` — Bloomberg Terminal (React UI)
+Starts the FastAPI backend (`uvicorn api.main:app --port 8000`) and the Vite dev server (`npm run dev` in `frontend/`). The built production version (`frontend/dist/`) is served directly by FastAPI at port 8000.
 
 ## 5. The decision pipeline (high-level)
 
@@ -188,15 +198,15 @@ Files (created by `core/knowledge_base.py:init_kb`):
 | `patterns.json`            | PatternAgent            | Top-5 DTW matches + EV summary                |
 | `bulk_deals.json`          | DiscoveryAgent (TBD)    | Stub — currently empty `{}` for all stocks    |
 
-### 6b. 1h dataset — `stocks_1h/`
-Per-symbol parquet of hourly candles + market context (`NIFTY_1h.parquet`, `BANKNIFTY_1h.parquet`, `VIX_1h.parquet`) + the trained `india_intraday_model.pkl`. Driven entirely by `india_intraday_model.py fetch|train|predict`.
+### 6b. 1h dataset — `models/stocks_1h/`
+Per-symbol parquet of hourly candles + market context (`NIFTY_1h.parquet`, `BANKNIFTY_1h.parquet`, `VIX_1h.parquet`) + the trained `india_intraday_model.pkl`. Driven entirely by `models/india_intraday_model.py fetch|train|predict`.
 
 ### 6c. Trade ledger — `paper_trades.db` (SQLite)
 Single table `trades`, schema in `agents/execution_agent.py:_get_conn`. Columns: `id, symbol, entry_date, entry_price, stop_loss, target, position_size, exit_date, exit_price, pnl_pct, pnl_inr, outcome, reasoning, created_at`.
 
 ### 6d. ML artefacts
 - `stocks/ml_signal_model.pkl` (daily, GradientBoosting, ~30 features)
-- `stocks_1h/india_intraday_model.pkl` (1h, GradientBoosting, ~30 features incl. F&O expiry days)
+- `models/stocks_1h/india_intraday_model.pkl` (1h, GradientBoosting, ~30 features incl. F&O expiry days)
 
 ## 7. External dependencies (network)
 
@@ -231,7 +241,6 @@ Single table `trades`, schema in `agents/execution_agent.py:_get_conn`. Columns:
 
 ## 9. What's missing (architecture-level)
 
-- **No tests.** Not a single `tests/` directory.
 - **No CI.** No `.github/`, no pre-commit, no linting config.
 - **No type checking.** Type hints are present but inconsistent.
 - **No metrics/observability.** Logs go to one file; no structured events, no Prometheus, no per-agent timing.

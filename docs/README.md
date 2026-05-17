@@ -48,7 +48,7 @@ There are two flavours:
 ### "I'm a new user, just installed the repo"
 1. [`user-guide.md`](user-guide.md) — sections 1–5.
 2. Run `python main.py`.
-3. Open the dashboard: `streamlit run dashboard.py`.
+3. Open the dashboard: `streamlit run scripts/dashboard.py`.
 4. Come back to `user-guide.md` §6–9 when ready.
 
 ### "I want to extend / modify the framework"

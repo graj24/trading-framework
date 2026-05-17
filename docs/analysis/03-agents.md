@@ -346,7 +346,7 @@ outcome ('open'|'win'|'loss'|'emergency_exit'), reasoning, created_at
 
 ---
 
-## 14. ML model — `ml_model.py` (daily)
+## 14. ML model — `models/ml_model.py` (daily)
 
 - Algorithm: `sklearn.GradientBoostingClassifier(n_estimators=300, max_depth=4, lr=0.05, subsample=0.8, max_features=0.8)`.
 - Features: ~30 (returns 1/3/5/10/20d, EMA ratios, BB position/width, RSI 7/14/21, MACD hist, Stoch, ROC, volume ratio, OBV trend, VPT, hist vol 5/10/20, gap, intraday range, market context for nifty/banknifty/vix/4 sectors, day-of-week, month).
@@ -360,7 +360,7 @@ outcome ('open'|'win'|'loss'|'emergency_exit'), reasoning, created_at
 
 ---
 
-## 15. ML model — `india_intraday_model.py` (1h)
+## 15. ML model — `models/india_intraday_model.py` (1h)
 
 - Same algorithm, ~30 features tuned for 1h candles (hour-of-day, mins-to-close, intraday return from open, F&O expiry days/week/day flags, market context).
 - Label: `1 if 3-hour forward return > 1.0%`.
@@ -378,7 +378,7 @@ outcome ('open'|'win'|'loss'|'emergency_exit'), reasoning, created_at
 - `sentiment_analyzer.py` — wraps `ProsusAI/finbert` via HF pipeline. Uses BART (`facebook/bart-large-cnn`) to summarise text > 100 words before scoring.
 - `twitter_collector.py` — actually fetches Reddit (stocks/wallstreetbets/investing) + Yahoo News, named "twitter" for legacy reasons.
 - `pipeline.py` — `StockSentimentPipeline.run(symbol)` — aggregates and scores.
-- `config.py` — has a hard-coded path `/Users/anantamanoranjan/Desktop/ripple/output` (developer's machine). **Bug.**
+- `config.py` — `OUTPUT_DIR` defaults to `<repo_root>/output` (resolved relative to the package). `DEFAULT_MAX_TWEETS` is configurable via env var.
 
 `NewsAgent` uses `SentimentAnalyzer` directly; the broader `StockSentimentPipeline` is not wired into the trading loop today.
 

@@ -1,206 +1,129 @@
-# Setup Guide
+# AWS Hosting — Trading Framework
 
-Everything you need to get the framework running. Start here.
+## What's running where
 
----
+```
+Your Mac  ──────────────────────────────────────────────────────────
+  ~/.ssh/trading-key.pem   (SSH key to access the server)
+  setup/deploy.sh          (script to push code updates)
 
-## 1. Prerequisites
+AWS (ap-south-1 / Mumbai)  ─────────────────────────────────────────
+  EC2: m7i-flex.large  (2 vCPU, 8GB RAM)
+  Elastic IP: 13.206.3.62  (fixed — won't change on reboot)
+  EBS: 20GB gp3  (all code, data, SQLite live here)
+  Security group: port 22 (SSH) + port 80 (HTTP) open
+```
 
-- Python 3.10+
-- git
-- ~2 GB free disk (stock data + ML models)
+## What runs on the server
 
+Three systemd services, all auto-start on reboot:
+
+| Service | What it does | Command |
+|---|---|---|
+| `trading-api` | FastAPI backend + serves React UI on port 8000 | `uvicorn api.main:app` |
+| `trading-daemon` | 24/7 trading scheduler (IST market hours) | `python main.py --schedule` |
+| `nginx` | Reverse proxy — forwards port 80 → port 8000 | — |
+
+## Access
+
+| | |
+|---|---|
+| App (React UI) | http://13.206.3.62 |
+| API docs (Swagger) | http://13.206.3.62/docs |
+| SSH into server | `ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62` |
+
+## File layout on server
+
+```
+/app/                        ← all project files live here
+├── .env                     ← secrets (GROQ_API_KEY etc.) — never in git
+├── config.yaml              ← trading config (watchlist, risk, schedule)
+├── paper_trades.db          ← SQLite trade ledger
+├── stocks/                  ← per-stock knowledge bases (built by DataAgent)
+├── models/stocks_1h/        ← 1h candle data + trained ML model
+├── logs/
+│   ├── daemon.log           ← trading scheduler logs
+│   ├── api.log              ← FastAPI logs
+│   └── trading.log          ← main pipeline logs
+└── frontend/dist/           ← built React app (served by FastAPI)
+```
+
+## Day-to-day operations
+
+### Push a code update from your Mac
 ```bash
-git clone <this-repo> trading-framework
-cd trading-framework
-python3.10 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+bash setup/deploy.sh 13.206.3.62 ~/.ssh/trading-key.pem
 ```
+This rsyncs code (skipping `.env`, `stocks/`, `paper_trades.db`), rebuilds the frontend, and restarts services.
 
----
-
-## 2. API keys
-
-Copy the template and fill in what you need:
-
+### Check if services are healthy
 ```bash
-cp .env.example .env
+ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+sudo systemctl status trading-api trading-daemon nginx
 ```
 
-### Required (nothing works without this)
-
-| Key | Where to get it | Free? |
-|-----|----------------|-------|
-| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) → API Keys | Yes |
-
-That's it. The system runs in paper-trading mode with just this one key.
-
-### Recommended (better intraday signals)
-
-| Key | Where to get it | What it unlocks |
-|-----|----------------|-----------------|
-| `GROWW_API_KEY` + `GROWW_SECRET` + `GROWW_TOTP_SECRET` | [groww.in/user/profile/trading-apis](https://groww.in/user/profile/trading-apis) | Live LTP, quotes, OHLC (replaces yfinance for intraday) |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Create bot via [@BotFather](https://t.me/BotFather); get chat_id from `https://api.telegram.org/bot<TOKEN>/getUpdates` | Trade alerts, anomaly notifications |
-
-### Only needed for live trading
-
-| Key | Where to get it | What it unlocks |
-|-----|----------------|-----------------|
-| `ZERODHA_API_KEY` + `ZERODHA_API_SECRET` + `ZERODHA_ACCESS_TOKEN` | [kite.trade](https://kite.trade/docs/connect/v3/install/) | Real order placement via Zerodha |
-
-To switch to live mode, also set `trading.mode: live` in `config.yaml`.
-
-### Alternative LLM providers (optional)
-
-The default is Groq (free). To use a different provider, set the key and update `llm.model` in `config.yaml`:
-
-| Provider | Key | Example model string |
-|----------|-----|---------------------|
-| OpenAI | `OPENAI_API_KEY` | `openai/gpt-4o-mini` |
-| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-3-5-sonnet-20241022` |
-| AWS Bedrock | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` + `AWS_REGION` | `bedrock/anthropic.claude-3-haiku` |
-
----
-
-## 3. First run
-
+### View live logs
 ```bash
-# Build knowledge base for one stock (smoke test)
-python -m agents.data_agent build RELIANCE
+# Trading scheduler
+tail -f /app/logs/daemon.log
 
-# Run one analysis cycle
-python main.py
+# FastAPI
+tail -f /app/logs/api.log
 
-# Open the dashboard (read-only)
-streamlit run ui/app.py
+# Or via journalctl
+sudo journalctl -u trading-daemon -f
+sudo journalctl -u trading-api -f
 ```
 
----
-
-## 4. Build stock data
-
-Before the ML models and pattern matching work, you need price history for your watchlist:
-
+### Restart a service
 ```bash
-# All stocks in config.yaml watchlist (takes ~5–10 min)
-python -m agents.data_agent build_all
-
-# Or one at a time
-python -m agents.data_agent build TCS
-python -m agents.data_agent build HDFCBANK
+sudo systemctl restart trading-api
+sudo systemctl restart trading-daemon
 ```
 
----
-
-## 5. Train the ML models (optional but recommended)
-
+### Edit secrets / config
 ```bash
-# Daily signal model (needs price history built first)
-python ml_model.py train
-
-# Intraday 1h model (needs 1h data fetched first)
-python india_intraday_model.py fetch   # ~10 min, downloads 2y of 1h data
-python india_intraday_model.py train
+nano /app/.env          # API keys
+nano /app/config.yaml   # watchlist, capital, risk settings
+sudo systemctl restart trading-daemon  # pick up config changes
 ```
 
-Models are saved to `stocks/ml_signal_model.pkl` and `stocks_1h/india_intraday_model.pkl`. The promotion gate prevents a worse model from overwriting a better one.
+## First-time data setup (already done if stocks/ exists)
 
----
-
-## 6. Run as a daemon (24/7 scheduler)
-
+If you ever need to rebuild stock data from scratch:
 ```bash
-python -m core.scheduler
+ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+cd /app && source .venv/bin/activate
+
+# Build knowledge bases (~15 min for full watchlist)
+python -c "
+import yaml; from agents.data_agent import DataAgent
+cfg = yaml.safe_load(open('config.yaml'))
+da = DataAgent(cfg)
+[da.build_kb(s) for s in cfg['watchlist']]
+"
+
+# Train ML models
+python models/ml_model.py train
+python models/india_intraday_model.py fetch
+python models/india_intraday_model.py train
 ```
 
-The scheduler follows IST market hours automatically:
+## Cost
 
-| Time (IST) | What runs |
-|-----------|-----------|
-| 06:00 | Update knowledge bases |
-| 07:00 | Discover new stocks |
-| 08:30 | Pre-market technical analysis |
-| 09:00 | Pre-open gap scan + signal generation |
-| 09:15 | Execute trades |
-| Every 5 min (09:15–15:00) | Monitor positions, intraday patterns |
-| 15:00 | Close all open positions |
-| 15:30 | Daily report + learning update |
+~$70/month (m7i-flex.large on-demand in ap-south-1).  
+Free tier eligible — covered by AWS credits.
 
----
+To stop billing if you want to pause: stop (not terminate) the instance from AWS Console.  
+The Elastic IP costs ~$3.60/month while the instance is stopped.
 
-## 7. Backtesting
+## AWS resource IDs (for reference)
 
-```bash
-# Gap strategy backtest
-python -m core.backtester --strategy gap --threshold 2.0
-
-# Intraday ML backtest (needs trained model)
-python -m core.backtester --strategy ml_intraday --threshold 0.55
-
-# Date-range replay (point-in-time simulation)
-python -m core.replay --start 2025-01-01 --end 2025-03-31
 ```
-
----
-
-## 8. Configuration
-
-Edit `config.yaml` for runtime settings. Key knobs:
-
-| Setting | Default | Effect |
-|---------|---------|--------|
-| `trading.mode` | `paper` | `paper` / `live` / `shadow` |
-| `trading.broker` | `zerodha` | `zerodha` / `upstox` / `angelone` |
-| `trading.capital` | `10000` | INR capital for position sizing |
-| `risk.max_loss_per_day_pct` | `3.0` | Halts new trades for the day |
-| `risk.max_open_positions` | `3` | Portfolio-wide cap |
-| `llm.model` | `groq/llama-3.3-70b-versatile` | Any litellm model string |
-| `watchlist` | 49 NIFTY 50 stocks | Stocks to analyse |
-
-**Never edit `config.yaml` from code.** Dynamic additions go to `data/dynamic_watchlist.json`.
-
----
-
-## 9. Shadow mode (test live broker without real money)
-
-Shadow mode sends orders to both the paper ledger and your live broker simultaneously, then logs the fill difference. Useful for validating broker connectivity before going live.
-
-```yaml
-# config.yaml
-trading:
-  mode: shadow
-  broker: zerodha   # or upstox / angelone
+Instance ID  : i-0ff6ea4482b95d3f6
+Elastic IP   : 13.206.3.62
+Alloc ID     : eipalloc-0adf311090a7cf7e4
+Security Group: sg-025a71fd666c80cb8
+Region       : ap-south-1
+SSH key      : ~/.ssh/trading-key.pem
 ```
-
-Requires the broker's API keys in `.env`. The paper leg always succeeds even if the live leg fails.
-
----
-
-## 10. What you don't need
-
-- No database server (SQLite only)
-- No message queue
-- No Docker (plain Python venv)
-- No paid data feed (yfinance + Groww free tier covers everything)
-- No Twitter/X API (discovery uses Nitter scraping)
-
----
-
-## Troubleshooting
-
-**`ModuleNotFoundError: transformers`** — FinBERT is heavy. Install it:
-```bash
-pip install transformers torch
-```
-Or set `news.use_finbert: false` in `config.yaml` to skip it.
-
-**`GROQ_API_KEY not set`** — Copy `.env.example` to `.env` and fill in the key.
-
-**`No price data for SYMBOL`** — Run `python -m agents.data_agent build SYMBOL` first.
-
-**Telegram alerts not arriving** — Check `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`. Send `/start` to your bot first.
-
-**`kiteconnect not installed`** — Only needed for live Zerodha trading: `pip install kiteconnect`.
-
-For more detail see [`docs/user-guide.md`](../docs/user-guide.md).

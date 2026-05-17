@@ -136,7 +136,7 @@ If a `BUY` is generated and confidence ≥ 60, the system opens a paper trade in
 
 ```bash
 pip install streamlit plotly      # if not already installed
-streamlit run dashboard.py
+streamlit run scripts/dashboard.py
 ```
 
 Open http://localhost:8501. You'll see five tabs: Portfolio, Signals, Backtest, News, Intraday ML.
@@ -291,7 +291,7 @@ python fetch_universe.py all         # everything (~250 symbols)
 After fetching, retrain the daily ML model so it learns from the broader history:
 
 ```bash
-python ml_model.py train
+python models/ml_model.py train
 ```
 
 ---
@@ -299,7 +299,7 @@ python ml_model.py train
 ## 6. The dashboard
 
 ```bash
-streamlit run dashboard.py
+streamlit run scripts/dashboard.py
 ```
 
 ### 6.1. Tabs
@@ -322,7 +322,7 @@ LTPs are cached for 60 seconds (`@st.cache_data(ttl=60)`). Use the sidebar **�
 
 - **Empty portfolio tab** = `paper_trades.db` is empty. Run `python main.py` first.
 - **"No news stored"** in News tab = `NewsAgent` hasn't run for that symbol. Run `python main.py` once.
-- **"Intraday model not trained yet"** = `stocks_1h/india_intraday_model.pkl` missing. Run `python india_intraday_model.py fetch && python india_intraday_model.py train`.
+- **"Intraday model not trained yet"** = `models/stocks_1h/india_intraday_model.pkl` missing. Run `python models/india_intraday_model.py fetch && python models/india_intraday_model.py train`.
 
 ---
 
@@ -388,22 +388,22 @@ There are two ML models, both `sklearn.GradientBoostingClassifier`:
 
 ```bash
 # Daily model — uses every stock in stocks/*/price_history.parquet
-python ml_model.py train
+python models/ml_model.py train
 
 # Intraday model — fetch first if you haven't
-python india_intraday_model.py fetch
-python india_intraday_model.py train
+python models/india_intraday_model.py fetch
+python models/india_intraday_model.py train
 ```
 
 Training prints CV AUC per fold and feature importances. Models are saved to:
 - `stocks/ml_signal_model.pkl`
-- `stocks_1h/india_intraday_model.pkl`
+- `models/stocks_1h/india_intraday_model.pkl`
 
 ### 8.2. Predict
 
 ```bash
-python ml_model.py predict TCS
-python india_intraday_model.py predict TCS
+python models/ml_model.py predict TCS
+python models/india_intraday_model.py predict TCS
 ```
 
 These are also automatically used inside `MasterAgent.run_for_stock` — explicit invocation is for debugging.
@@ -411,8 +411,8 @@ These are also automatically used inside `MasterAgent.run_for_stock` — explici
 ### 8.3. Backtest the ML signals
 
 ```bash
-python ml_model.py backtest                # across watchlist
-python ml_model.py backtest RELIANCE       # single
+python models/ml_model.py backtest                # across watchlist
+python models/ml_model.py backtest RELIANCE       # single
 ```
 
 Reports BUY-signal accuracy = "of all days the model said BUY, what fraction had the 5-day forward return > 1.5%?"
@@ -477,8 +477,8 @@ You should **also** consider adding broker-side limits (Zerodha allows order-val
 - Try `python -m agents.news_agent` to confirm whether yfinance is reachable.
 
 ### 10.5. `Intraday model not trained yet`
-- `stocks_1h/india_intraday_model.pkl` doesn't exist.
-- Run `python india_intraday_model.py fetch && python india_intraday_model.py train` (~10 minutes).
+- `models/stocks_1h/india_intraday_model.pkl` doesn't exist.
+- Run `python models/india_intraday_model.py fetch && python models/india_intraday_model.py train` (~10 minutes).
 
 ### 10.6. Streamlit shows numbers in red
 - That's intentional — losses display in red, gains in green. Not an error.
