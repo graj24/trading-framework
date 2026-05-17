@@ -10,6 +10,13 @@ from fastapi import APIRouter
 router = APIRouter(prefix="/api/infra", tags=["infra"])
 
 
+def _run(cmd: str) -> str:
+    try:
+        return subprocess.check_output(cmd, shell=True, text=True, timeout=5).strip()
+    except Exception:
+        return "unknown"
+
+
 def _imds(path: str) -> str:
     """Fetch EC2 instance metadata using IMDSv2."""
     try:
