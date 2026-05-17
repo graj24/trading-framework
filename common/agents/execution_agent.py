@@ -21,31 +21,50 @@ DB_PATH = Path(__file__).parent.parent.parent / "paper_trades.db"
 
 
 def migrate_trades_schema(db_path=None) -> None:
-    """Idempotently ensure the trades table exists with all columns."""
+    """Idempotently ensure the trades table exists with all required columns."""
     path = db_path or DB_PATH
     conn = sqlite3.connect(path)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS trades (
-            id            TEXT PRIMARY KEY,
-            symbol        TEXT NOT NULL,
-            entry_date    TEXT,
-            entry_price   REAL,
-            stop_loss     REAL,
-            target        REAL,
-            position_size REAL,
-            exit_date     TEXT,
-            exit_price    REAL,
-            pnl_pct       REAL,
-            pnl_inr       REAL,
-            outcome       TEXT DEFAULT 'open',
-            reasoning     TEXT,
-            signals_json  TEXT,
-            created_at    TEXT
+            id               TEXT PRIMARY KEY,
+            symbol           TEXT NOT NULL,
+            entry_date       TEXT,
+            entry_price      REAL,
+            stop_loss        REAL,
+            target           REAL,
+            position_size    REAL,
+            exit_date        TEXT,
+            exit_price       REAL,
+            pnl_pct          REAL,
+            pnl_inr          REAL,
+            outcome          TEXT DEFAULT 'open',
+            reasoning        TEXT,
+            signals_json     TEXT,
+            created_at       TEXT,
+            pm_id            TEXT,
+            technical_score  REAL,
+            sentiment        REAL,
+            pattern_ev       REAL,
+            sector_momentum  REAL,
+            regime_alignment REAL,
+            weights_applied  INTEGER DEFAULT 0,
+            signal_source    TEXT
         )
     """)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
-    if "signals_json" not in cols:
-        conn.execute("ALTER TABLE trades ADD COLUMN signals_json TEXT")
+    for col, typedef in [
+        ("signals_json",     "TEXT"),
+        ("pm_id",            "TEXT"),
+        ("technical_score",  "REAL"),
+        ("sentiment",        "REAL"),
+        ("pattern_ev",       "REAL"),
+        ("sector_momentum",  "REAL"),
+        ("regime_alignment", "REAL"),
+        ("weights_applied",  "INTEGER DEFAULT 0"),
+        ("signal_source",    "TEXT"),
+    ]:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {typedef}")
     conn.commit()
     conn.close()
 
@@ -53,30 +72,7 @@ def migrate_trades_schema(db_path=None) -> None:
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id            TEXT PRIMARY KEY,
-            symbol        TEXT NOT NULL,
-            entry_date    TEXT,
-            entry_price   REAL,
-            stop_loss     REAL,
-            target        REAL,
-            position_size REAL,
-            exit_date     TEXT,
-            exit_price    REAL,
-            pnl_pct       REAL,
-            pnl_inr       REAL,
-            outcome       TEXT DEFAULT 'open',
-            reasoning     TEXT,
-            signals_json  TEXT,
-            created_at    TEXT
-        )
-    """)
-    # Migrate: add signals_json if it doesn't exist yet
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
-    if "signals_json" not in cols:
-        conn.execute("ALTER TABLE trades ADD COLUMN signals_json TEXT")
-    conn.commit()
+    migrate_trades_schema(DB_PATH)
     return conn
 
 
@@ -117,17 +113,46 @@ def today_pnl_pct(capital: float = 0, db_path=None) -> float:
     path = db_path or DB_PATH
     if not Path(path).exists():
         return 0.0
-    today = date.today().isoformat()
+    today_prefix = date.today().isoformat()  # "2026-05-17"
     with sqlite3.connect(path) as conn:
         rows = conn.execute(
             "SELECT pnl_inr FROM trades WHERE outcome != 'open' AND exit_date >= ?",
-            (today,),
+            (today_prefix,),
         ).fetchall()
-    total_inr = sum(r[0] for r in rows if r[0])
-    return round(total_inr / capital, 6) if capital else 0.0
+    total_inr = sum(r[0] for r in rows if r[0] is not None)
+    return round(total_inr / capital * 100, 6)
+
+
+def fetch_unweighted_closed_trades(db_path=None) -> list[dict]:
+    """Return closed trades where weights have not yet been applied."""
+    path = db_path or DB_PATH
+    if not Path(path).exists():
+        return []
+    with sqlite3.connect(path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE outcome != 'open' AND weights_applied = 0"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_trade_weights_applied(db_path, trade_id: str) -> None:
+    """Mark a trade as having had its weights applied."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE trades SET weights_applied = 1 WHERE id = ?", (trade_id,))
 
 
 def _get_ltp(symbol: str) -> float:
+    # Try Groww first
+    try:
+        from common.core.groww_client import get_groww_client
+        client = get_groww_client()
+        prices = client.get_ltp([symbol])
+        if prices and symbol in prices and prices[symbol]:
+            return float(prices[symbol])
+    except Exception:
+        pass
+    # Fall back to yfinance
     try:
         t = yf.Ticker(symbol + ".NS")
         hist = t.history(period="1d")
@@ -166,29 +191,54 @@ class ExecutionAgent(Agent):
     def execute_trade(self, symbol: str, entry_price: float, stop_loss: float,
                       target: float, position_size: float, reasoning: str = "",
                       signals: dict | None = None,
-                      signals_at_entry: dict | None = None) -> dict:
-        """Open a new paper trade."""
-        signals = signals or signals_at_entry  # accept both kwarg names
-        if self.mode != "paper":
-            raise RuntimeError("Live trading not yet enabled. Set mode=paper in config.")
-
+                      signals_at_entry: dict | None = None,
+                      pm_id: str | None = None) -> dict:
+        """Open a new trade (paper or live)."""
+        sigs = signals_at_entry or signals or {}
         import json as _json
+
         trade_id = str(uuid.uuid4())[:8]
         entry_price_with_slip = round(entry_price * (1 + SLIPPAGE), 2)
         now = datetime.now().isoformat()
-        signals_json = _json.dumps(signals) if signals else None
+        signals_json = _json.dumps(sigs) if sigs else None
 
-        with _get_conn() as conn:
+        broker_order_id = None
+        if self.mode == "live":
+            from common.core.broker import get_broker
+            broker = get_broker(self.config)
+            qty = max(1, int(position_size / entry_price_with_slip))
+            broker_order_id = broker.place_order(
+                symbol=symbol, qty=qty, order_type="MARKET",
+                price=0, sl=stop_loss, tag=f"pm{pm_id or ''}_live",
+                pm_id=pm_id or "",
+            )
+
+        migrate_trades_schema(DB_PATH)
+        with sqlite3.connect(DB_PATH) as conn:
             conn.execute("""
                 INSERT INTO trades (id, symbol, entry_date, entry_price, stop_loss, target,
-                                    position_size, outcome, reasoning, signals_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
-            """, (trade_id, symbol, now, entry_price_with_slip, stop_loss, target,
-                  position_size, reasoning, signals_json, now))
+                                    position_size, outcome, reasoning, signals_json, created_at,
+                                    pm_id, technical_score, sentiment, pattern_ev,
+                                    sector_momentum, regime_alignment, weights_applied, signal_source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+            """, (
+                trade_id, symbol, now, entry_price_with_slip, stop_loss, target,
+                position_size, reasoning, signals_json, now,
+                pm_id,
+                sigs.get("technical_score"),
+                sigs.get("sentiment"),
+                sigs.get("pattern_ev"),
+                sigs.get("sector_momentum"),
+                sigs.get("regime_alignment"),
+                sigs.get("signal_source"),
+            ))
 
-        logger.info(f"Paper trade opened: {trade_id} | {symbol} @ ₹{entry_price_with_slip} | SL ₹{stop_loss} | T ₹{target}")
-        return {"trade_id": trade_id, "symbol": symbol, "entry_price": entry_price_with_slip,
-                "stop_loss": stop_loss, "target": target, "position_size": position_size}
+        logger.info(f"Trade opened: {trade_id} | {symbol} @ ₹{entry_price_with_slip} | SL ₹{stop_loss} | T ₹{target}")
+        result = {"trade_id": trade_id, "symbol": symbol, "entry_price": entry_price_with_slip,
+                  "stop_loss": stop_loss, "target": target, "position_size": position_size}
+        if broker_order_id:
+            result["broker_order_id"] = broker_order_id
+        return result
 
     def monitor_positions(self) -> list[dict]:
         """Check all open positions against current prices. Close if SL/target hit."""

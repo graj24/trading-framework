@@ -73,6 +73,12 @@ def _check_global_rate_limit(pm_id: str = ""):
         q.append(now)
 
 
+def _reset_rate_limiters():
+    """Clear all rate-limiter state. For use in tests only."""
+    _GLOBAL_ORDER_TIMES.clear()
+    _PM_ORDER_TIMES.clear()
+
+
 class Broker(ABC):
     @abstractmethod
     def place_order(self, symbol: str, qty: int, order_type: str,

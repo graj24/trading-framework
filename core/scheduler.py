@@ -23,6 +23,12 @@ from core.config import get_config
 logger = logging.getLogger(__name__)
 
 
+def today_pnl_pct(capital: float, db_path=None) -> float:
+    """Module-level wrapper so tests can patch core.scheduler.today_pnl_pct."""
+    from agents.execution_agent import today_pnl_pct as _fn
+    return _fn(capital, db_path=db_path)
+
+
 def _load_config() -> dict:
     return get_config()
 
@@ -153,6 +159,11 @@ def job_preopen_scan():
 
         # Pre-open price scan
         result = PreOpenMonitor(config).scan()
+        # Anomaly alert: if scan returned no results at all, something is wrong
+        all_preopen = result.get("all_preopen", result.get("buy_signals", []) + result.get("avoid_signals", []))
+        if not all_preopen:
+            alerter.send("⚠️ ANOMALY: Pre-open scan returned 0 results — data feed may be down")
+            logger.warning("Pre-open scan returned 0 results — possible data feed issue")
         for s in result.get("buy_signals", []):
             logger.info(f"  🟢 Gap-up: {s['symbol']} {s['gap_pct']:+.1f}% — {s['reasoning']}")
             alerter.send(f"⚡ PRE-OPEN GAP-UP: <b>{s['symbol']}</b> {s['gap_pct']:+.1f}%\n"
@@ -297,7 +308,8 @@ def job_execute_trades():
 
 def job_intraday_scan():
     """Run intraday pattern scanner — fires every 5 min during market hours."""
-    now = datetime.now()
+    from zoneinfo import ZoneInfo
+    now = datetime.now(tz=ZoneInfo("Asia/Kolkata"))
     # Only run during market hours 9:15 AM - 3:00 PM IST
     if not (9 * 60 + 15 <= now.hour * 60 + now.minute <= 15 * 60):
         return
@@ -352,13 +364,25 @@ def job_monitor_positions():
     try:
         import sqlite3 as _sqlite3
         from pathlib import Path as _Path
-        from agents.execution_agent import ExecutionAgent
+        from agents.execution_agent import ExecutionAgent, today_pnl_pct
         from agents.news_agent import NewsAgent
         from core.alerts import TelegramAlerter
         config = _load_config()
         executor = ExecutionAgent(config)
         news_agent = NewsAgent(config)
         alerter = TelegramAlerter()
+
+        # P&L limit proximity alert (fire at 75% of daily limit)
+        capital = config.get("trading", {}).get("capital", 10000)
+        max_loss_pct = config.get("risk", {}).get("max_loss_per_day_pct", 3.0)
+        import core.scheduler as _self
+        current_pnl_pct = _self.today_pnl_pct(capital)
+        threshold = -max_loss_pct * 0.75
+        if current_pnl_pct <= threshold:
+            alerter.send(
+                f"⚠️ P&L ALERT: Daily P&L at {current_pnl_pct:.1f}% "
+                f"(limit: -{max_loss_pct:.1f}%, threshold: {threshold:.1f}%)"
+            )
 
         # Check SL/target
         closed = executor.monitor_positions()
