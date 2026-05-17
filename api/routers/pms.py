@@ -138,7 +138,35 @@ def get_triage_log(pm_id: str, limit: int = Query(100, le=1000)):
     return entries[-limit:]
 
 
-@router.get("/{pm_id}/trades")
+@router.get("/{pm_id}/equity_today")
+def get_equity_today(pm_id: str):
+    """Running cumulative P&L series for today, with trade markers."""
+    db = BASE / "paper_trades.db"
+    if not db.exists():
+        return []
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT symbol, pnl_inr, exit_date, exit_reason, outcome
+               FROM trades
+               WHERE pm_id=? AND outcome!='open' AND exit_date >= date('now')
+               ORDER BY rowid ASC""",
+            (pm_id,),
+        ).fetchall()
+    cum = 0.0
+    result = []
+    for r in rows:
+        cum += r["pnl_inr"] or 0
+        result.append({
+            "ts": r["exit_date"],
+            "symbol": r["symbol"],
+            "pnl": round(r["pnl_inr"] or 0, 2),
+            "cum_pnl": round(cum, 2),
+            "exit_reason": r["exit_reason"],
+        })
+    return result
+
+
 def get_pm_trades(pm_id: str, limit: int = Query(50, le=500)):
     db = BASE / "paper_trades.db"
     if not db.exists():

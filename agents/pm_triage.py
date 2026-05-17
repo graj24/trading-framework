@@ -78,6 +78,17 @@ def _classify_with_llm(event: dict, pm_id: str) -> str:
         import litellm
         topic = event.get("topic", "")
         payload = event.get("payload", {})
+
+        # Emit "thinking" start event so UI can show animation
+        try:
+            get_bus().publish(
+                f"agent.thinking.{pm_id}",
+                {"agent": "triage", "status": "start", "context": f"Evaluating {topic}: {payload.get('symbol', '')}"},
+                pm_id=pm_id,
+            )
+        except Exception:
+            pass
+
         prompt = (
             f"You are a trading triage assistant for PM{pm_id}.\n"
             f"Event topic: {topic}\n"
@@ -95,7 +106,19 @@ def _classify_with_llm(event: dict, pm_id: str) -> str:
             max_tokens=10,
             temperature=0,
         )
-        return resp.choices[0].message.content.strip().lower()
+        result = resp.choices[0].message.content.strip().lower()
+
+        # Emit "thinking" done event
+        try:
+            get_bus().publish(
+                f"agent.thinking.{pm_id}",
+                {"agent": "triage", "status": "done", "output": result, "context": f"{topic}: {payload.get('symbol', '')}"},
+                pm_id=pm_id,
+            )
+        except Exception:
+            pass
+
+        return result
     except Exception as e:
         logger.warning(f"Triage LLM failed: {e} — defaulting to wakeup")
         return "wakeup"

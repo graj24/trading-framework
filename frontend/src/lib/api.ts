@@ -43,6 +43,7 @@ export const api = {
   pmAudit: (id: string) => req<AuditEntry[]>(`/api/pms/${id}/audit`),
   pmTriageLog: (id: string) => req<TriageDecision[]>(`/api/pms/${id}/triage_log`),
   pmTrades: (id: string) => req<Trade[]>(`/api/pms/${id}/trades`),
+  pmEquityToday: (id: string) => req<EquityPoint[]>(`/api/pms/${id}/equity_today`),
   pmEvents: (sinceId: number, pmId?: string) => {
     const q = new URLSearchParams({ since_id: String(sinceId) });
     if (pmId) q.set("pm_id", pmId);
@@ -164,6 +165,14 @@ export interface PMEvent {
   pm_id: string | null;
   severity: string;
   ts: string;
+}
+
+export interface EquityPoint {
+  ts: string;
+  symbol: string;
+  pnl: number;
+  cum_pnl: number;
+  exit_reason: string;
 }
 
 export interface AuditEntry {

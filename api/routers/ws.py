@@ -87,13 +87,13 @@ async def websocket_live(ws: WebSocket):
 
 
 @router.websocket("/ws/pm_events")
-async def websocket_pm_events(ws: WebSocket):
-    """Stream events.db in real-time to the PM monitoring page."""
+async def websocket_pm_events(ws: WebSocket, pm_id: str | None = None):
+    """Stream events.db in real-time to the PM monitoring page. Optional ?pm_id= filter."""
     import sqlite3 as _sqlite3
     from pathlib import Path as _Path
 
     await ws.accept()
-    logger.info("PM events WS client connected")
+    logger.info("PM events WS client connected (pm_id=%s)", pm_id)
 
     EVENTS_DB = _Path("events.db")
     cursor = 0
@@ -114,10 +114,16 @@ async def websocket_pm_events(ws: WebSocket):
             try:
                 with _sqlite3.connect(EVENTS_DB) as conn:
                     conn.row_factory = _sqlite3.Row
-                    rows = conn.execute(
-                        "SELECT * FROM events WHERE id > ? ORDER BY id LIMIT 50",
-                        (cursor,),
-                    ).fetchall()
+                    if pm_id:
+                        rows = conn.execute(
+                            "SELECT * FROM events WHERE id > ? AND pm_id = ? ORDER BY id LIMIT 50",
+                            (cursor, pm_id),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            "SELECT * FROM events WHERE id > ? ORDER BY id LIMIT 50",
+                            (cursor,),
+                        ).fetchall()
                 for row in rows:
                     d = dict(row)
                     try:
