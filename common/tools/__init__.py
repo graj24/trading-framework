@@ -136,7 +136,7 @@ def run_pytest(pm_id: str, test_path: str = "") -> str:
     try:
         result = subprocess.run(
             [str(_APP_ROOT / ".venv/bin/python"), "-m", "pytest", target,
-             "--tb=short", "-q", "--no-header", "--timeout=60"],
+             "--tb=short", "-q", "--no-header"],
             capture_output=True, text=True, timeout=120, cwd=str(_APP_ROOT),
             env={**os.environ, "PYTHONPATH": str(_APP_ROOT)},
         )

@@ -200,6 +200,23 @@ When done, return a JSON object as your final message:
 
                 # No tool calls — expect final JSON decision
                 raw = (msg.content or "").strip()
+
+                # Groq/llama sometimes wraps the final answer as a tool call
+                # e.g. <function=DO_NOTHING>{"action":...}</function>
+                if not raw and getattr(msg, "tool_calls", None):
+                    for tc in msg.tool_calls:
+                        if tc.function.name in ACTIONS:
+                            try:
+                                args = json.loads(tc.function.arguments)
+                                # Reconstruct as if it were a plain JSON response
+                                raw = json.dumps({
+                                    "action": tc.function.name,
+                                    "reasoning": args.get("reasoning", tc.function.name),
+                                    "details": args.get("details", {}),
+                                })
+                            except Exception:
+                                raw = json.dumps({"action": tc.function.name, "reasoning": "", "details": {}})
+                            break
                 if raw.startswith("```"):
                     raw = raw.split("```")[1]
                     if raw.startswith("json"):
