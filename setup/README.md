@@ -48,6 +48,36 @@ Three systemd services, all auto-start on reboot:
 └── frontend/dist/           ← built React app (served by FastAPI)
 ```
 
+## Makefile tasks (run from repo root)
+
+All common tasks are available via `make`. No need to remember commands.
+
+### Local development
+| Command | What it does |
+|---|---|
+| `make run` | Run one analysis cycle locally |
+| `make schedule` | Start the 24/7 scheduler locally |
+| `make dashboard` | Open Streamlit dashboard |
+| `make ui` | Start FastAPI + React UI locally |
+| `make test` | Run pytest |
+
+### EC2 operations
+| Command | What it does |
+|---|---|
+| `make deploy` | Push latest code to EC2 + restart services |
+| `make ssh` | SSH into EC2 |
+| `make logs` | Tail live daemon logs on EC2 |
+| `make status` | Check health of all 3 services on EC2 |
+| `make restart` | Restart trading-api and trading-daemon on EC2 |
+
+### Updating secrets
+Updates the key in **both** your local `.env` and EC2's `.env`, then restarts EC2 services:
+```bash
+make update-key KEY=GROQ_API_KEY VALUE=your_new_key_here
+```
+
+---
+
 ## Day-to-day operations
 
 ### Push a code update from your Mac
