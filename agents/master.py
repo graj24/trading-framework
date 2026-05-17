@@ -44,11 +44,23 @@ def _rag_context(symbol: str) -> dict:
     }
 
 
-def _llm_decision(symbol: str, price: float, scores: dict, rag: dict, config: dict) -> dict:
+def _llm_decision(symbol: str, price: float, scores: dict, rag: dict, config: dict, pm_id: str | None = None) -> dict:
     """Call LLM for trade decision. Falls back to rule-based on failure."""
     try:
         import litellm
         llm_cfg = config.get("llm", {})
+
+        # Emit thinking start
+        if pm_id:
+            try:
+                from core.event_bus import get_bus
+                get_bus().publish(
+                    f"agent.thinking.{pm_id}",
+                    {"agent": "master", "status": "start", "context": f"Analyzing {symbol} @ ₹{price}"},
+                    pm_id=pm_id,
+                )
+            except Exception:
+                pass
 
         # Pull recent headlines and extra fundamentals from KB
         from core.knowledge_base import read_kb
@@ -88,7 +100,21 @@ EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        return json.loads(raw)
+        result = json.loads(raw)
+
+        # Emit thinking done
+        if pm_id:
+            try:
+                from core.event_bus import get_bus
+                get_bus().publish(
+                    f"agent.thinking.{pm_id}",
+                    {"agent": "master", "status": "done", "output": result.get("reasoning", ""), "decision": result.get("decision"), "confidence": result.get("confidence")},
+                    pm_id=pm_id,
+                )
+            except Exception:
+                pass
+
+        return result
     except Exception as e:
         logger.warning(f"LLM unavailable ({type(e).__name__}), using rule-based fallback")
         return _rule_based_decision(price, scores)
@@ -331,7 +357,7 @@ class MasterAgent(Agent):
         rag = _rag_context(symbol)
 
         # 6. LLM decision (with fallback)
-        llm_out = _llm_decision(symbol, price, scores, rag, self.config)
+        llm_out = _llm_decision(symbol, price, scores, rag, self.config, pm_id=getattr(self, "pm_id", None))
 
         decision = llm_out.get("decision", "HOLD")
         confidence = llm_out.get("confidence", 50)

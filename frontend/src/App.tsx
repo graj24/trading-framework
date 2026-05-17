@@ -9,6 +9,7 @@ import { Backtest } from "@/pages/Backtest";
 import { Setup } from "@/pages/Setup";
 import { Replay } from "@/pages/Replay";
 import { Infra } from "@/pages/Infra";
+import { PMCockpit } from "@/pages/PMCockpit";
 import { PMs } from "@/pages/PMs";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
@@ -31,6 +32,7 @@ function AppShell() {
             <Route path="/setup" element={<Setup />} />
             <Route path="/infra" element={<Infra />} />
             <Route path="/pms" element={<PMs />} />
+            <Route path="/pms/:pmId" element={<PMCockpit />} />
           </Routes>
         </main>
       </div>
