@@ -1,0 +1,55 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap");
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; }
+  body {
+    background-color: #0a0e17;
+    color: #f9fafb;
+    font-family: "Inter", system-ui, sans-serif;
+    font-size: 13px;
+    margin: 0;
+    overflow: hidden;
+  }
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: #0a0e17; }
+  ::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 2px; }
+}
+
+@layer components {
+  .mono { font-family: "JetBrains Mono", "Fira Code", monospace; }
+  .metric-card {
+    @apply bg-bg-secondary border border-border rounded p-3;
+  }
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full;
+  }
+  .status-dot.active {
+    animation: pulse-dot 1.5s ease-in-out infinite;
+  }
+  .flash-green { animation: flash-g 0.3s ease-out; }
+  .flash-red   { animation: flash-r 0.3s ease-out; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.4; transform: scale(0.8); }
+}
+@keyframes flash-g {
+  0%   { background-color: rgba(0, 212, 170, 0.4); }
+  100% { background-color: transparent; }
+}
+@keyframes flash-r {
+  0%   { background-color: rgba(255, 77, 77, 0.4); }
+  100% { background-color: transparent; }
+}
+@keyframes ticker-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.ticker-tape {
+  animation: ticker-scroll 40s linear infinite;
+  white-space: nowrap;
+}

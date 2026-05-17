@@ -213,6 +213,49 @@ class ExecutionAgent(Agent):
             "worst_trade": min(pnls) if pnls else None,
         }
 
+    def signal_attribution(self, since_date: str | None = None) -> list[dict]:
+        """P2 §19: Group closed trades by signal_source and compute per-source stats.
+
+        Args:
+            since_date: ISO date string (e.g. "2026-01-01"). If None, uses all history.
+
+        Returns a list of dicts, one per signal_source, sorted by total P&L descending:
+            {signal_source, trades, win_rate, total_pnl_inr, avg_pnl_pct, avg_pnl_inr}
+        """
+        query = "SELECT * FROM trades WHERE outcome != 'open'"
+        params: tuple = ()
+        if since_date:
+            query += " AND exit_date >= ?"
+            params = (since_date,)
+
+        with _get_conn() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        if not rows:
+            return []
+
+        # Group by signal_source (NULL → "unknown")
+        groups: dict[str, list] = {}
+        for row in rows:
+            src = (row["signal_source"] if row["signal_source"] is not None else "unknown") if "signal_source" in row.keys() else "unknown"
+            groups.setdefault(src, []).append(row)
+
+        result = []
+        for src, trades in groups.items():
+            pnl_pcts = [t["pnl_pct"] for t in trades if t["pnl_pct"] is not None]
+            pnl_inrs = [t["pnl_inr"] for t in trades if t["pnl_inr"] is not None]
+            wins     = [p for p in pnl_pcts if p > 0]
+            result.append({
+                "signal_source":  src,
+                "trades":         len(trades),
+                "win_rate":       round(len(wins) / len(pnl_pcts) * 100, 1) if pnl_pcts else 0.0,
+                "total_pnl_inr":  round(sum(pnl_inrs), 2),
+                "avg_pnl_pct":    round(sum(pnl_pcts) / len(pnl_pcts), 3) if pnl_pcts else 0.0,
+                "avg_pnl_inr":    round(sum(pnl_inrs) / len(pnl_inrs), 2) if pnl_inrs else 0.0,
+            })
+
+        return sorted(result, key=lambda x: x["total_pnl_inr"], reverse=True)
+
 
 if __name__ == "__main__":
     import yaml

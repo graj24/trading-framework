@@ -1,12 +1,15 @@
-"""core/replay.py — date-range replay harness.
+"""core/replay.py — pluggable date-range replay harness.
 
-Generalises simulate_day.py to a full date range.  For each trading day in
-[start, end] the pipeline runs with only the data that would have been
-available at that timestamp (point-in-time slicing of parquet files).
+Supports any Strategy subclass (from core.backtester) via replay_strategy(),
+and also provides the original gap-only replay() for backward compatibility.
+
+Note: replay_strategy(GapStrategy()) is the recommended path.  The legacy
+replay() function is kept for backward compatibility.
 
 Usage
 -----
 python -m core.replay --start 2025-01-01 --end 2025-03-31 --symbols RELIANCE TCS
+python -m core.replay --start 2025-01-01 --end 2025-03-31 --strategy gap
 python -m core.replay --start 2025-01-01 --end 2025-03-31  # uses config.yaml watchlist
 
 The replay writes trades to a *separate* SQLite file (replay_trades.db by
@@ -31,7 +34,7 @@ from core.knowledge_base import kb_path
 
 logger = logging.getLogger(__name__)
 
-REPLAY_DB = Path("replay_trades.db")
+REPLAY_DB = Path(__file__).parent.parent / "replay_trades.db"
 CAPITAL   = 10_000
 POS_PCT   = 0.15
 
@@ -115,12 +118,14 @@ def _gap_signal(df: pd.DataFrame, gap_threshold: float = 2.0) -> dict | None:
     ema12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema26 = df["Close"].ewm(span=26, adjust=False).mean()
     macd  = ema12 - ema26
-    macd_bull = float(macd.iloc[-1]) > float((macd - macd.ewm(span=9, adjust=False).mean()).iloc[-1])
+    macd_bull = (macd - macd.ewm(span=9, adjust=False).mean()).iloc[-1] > 0
     vol_avg20 = float(df["Volume"].rolling(20).mean().iloc[-1])
 
     if row["Volume"] < vol_avg20 * 1.5:
         return None
     if prev_row["Close"] < ema50:
+        return None
+    if not macd_bull:
         return None
 
     entry  = round(float(row["Open"]) * (1 + SLIPPAGE), 2)
@@ -195,6 +200,60 @@ def replay(
     return pd.DataFrame(all_rows)
 
 
+# ── Pluggable strategy replay ─────────────────────────────────────────────────
+
+def replay_strategy(
+    strategy: "Strategy",
+    symbols: list[str],
+    start: date,
+    end: date,
+    db_path: Path = REPLAY_DB,
+) -> pd.DataFrame:
+    """Run *strategy* day-by-day over [start, end] for each symbol.
+
+    For each trading day, builds a point-in-time slice of price history and
+    calls strategy.signal(pit_df, symbol).  Only strategies that implement
+    signal() are supported; others raise NotImplementedError on first call.
+
+    Returns a DataFrame of all simulated trades (same schema as replay()).
+    """
+    from core.backtester import Strategy  # local import to avoid circular at module level
+
+    _init_db(db_path)
+    all_rows: list[dict] = []
+    days = list(_trading_days(start, end))
+    logger.info("replay_strategy(%s): %d symbols × %d days", strategy.name, len(symbols), len(days))
+
+    for sym in symbols:
+        for d in days:
+            df = _pit_slice(sym, d)
+            if df is None or df.index[-1].date() != d:
+                continue
+            trade = strategy.signal(df, sym)
+            if trade is None:
+                continue
+            brok    = (trade.entry + trade.exit) * trade.qty * BROKERAGE
+            pnl_inr = (trade.exit - trade.entry) * trade.qty - brok
+            pnl_pct = (trade.exit - trade.entry) / trade.entry * 100
+            all_rows.append({
+                "id":          str(uuid.uuid4())[:8],
+                "symbol":      sym,
+                "date":        str(trade.entry_dt.date()),
+                "entry":       trade.entry,
+                "exit":        round(trade.exit, 2),
+                "qty":         trade.qty,
+                "exit_reason": trade.exit_reason,
+                "pnl_pct":     round(pnl_pct, 3),
+                "pnl_inr":     round(pnl_inr, 2),
+                "win":         int(pnl_inr > 0),
+                "signal":      strategy.name,
+            })
+
+    _insert(db_path, all_rows)
+    logger.info("replay_strategy complete: %d trades → %s", len(all_rows), db_path)
+    return pd.DataFrame(all_rows)
+
+
 def print_replay_report(df: pd.DataFrame, start: date, end: date) -> None:
     if df.empty:
         print("No trades generated in replay.")
@@ -230,7 +289,6 @@ def print_replay_report(df: pd.DataFrame, start: date, end: date) -> None:
 
 if __name__ == "__main__":
     import yaml
-    from core.logger import setup_logging
 
     logging.basicConfig(level=logging.INFO)
 
@@ -238,7 +296,10 @@ if __name__ == "__main__":
     parser.add_argument("--start",     required=True, help="Start date YYYY-MM-DD")
     parser.add_argument("--end",       required=True, help="End date YYYY-MM-DD")
     parser.add_argument("--symbols",   nargs="*",     default=None)
-    parser.add_argument("--threshold", type=float,    default=2.0)
+    parser.add_argument("--strategy",  default="gap", choices=["gap", "ml_intraday"],
+                        help="Strategy to replay (default: gap)")
+    parser.add_argument("--threshold", type=float,    default=2.0,
+                        help="Gap threshold %% for gap strategy, or ML prob threshold")
     parser.add_argument("--db",        default=str(REPLAY_DB))
     args = parser.parse_args()
 
@@ -256,5 +317,11 @@ if __name__ == "__main__":
     end   = date.fromisoformat(args.end)
     db    = Path(args.db)
 
-    df = replay(symbols, start, end, gap_threshold=args.threshold, db_path=db)
+    from core.backtester import GapStrategy, IntradayMLStrategy
+    if args.strategy == "gap":
+        strategy = GapStrategy(threshold=args.threshold)
+    else:
+        strategy = IntradayMLStrategy(threshold=args.threshold)
+
+    df = replay_strategy(strategy, symbols, start, end, db_path=db)
     print_replay_report(df, start, end)

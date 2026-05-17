@@ -22,7 +22,5 @@ dashboard = ["streamlit>=1.36", "plotly>=5.22"]
 test = ["pytest>=8.0"]
 
 [tool.setuptools]
-packages = ["agents", "core", "ripple"]
-py-modules = ["main", "ml_model", "india_intraday_model", "dashboard",
-              "simulate_day", "test_stock", "fetch_universe",
-              "backtest_gap", "backtest_intraday"]
+packages = ["agents", "core", "ripple", "api", "models", "scripts"]
+py-modules = ["main"]

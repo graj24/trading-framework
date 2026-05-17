@@ -1,7 +1,9 @@
 """Dashboard — portfolio, signals, backtests, news.
 
-Wraps the existing dashboard.py, skipping its set_page_config call
-(already set by the multi-page app framework).
+Intentionally thin: wraps the existing dashboard.py rather than duplicating
+its logic.  All dashboard content lives in dashboard.py; this page just
+re-executes it inside the multi-page app, stripping the set_page_config call
+that would conflict with the app-level page config.
 """
 import sys
 from pathlib import Path

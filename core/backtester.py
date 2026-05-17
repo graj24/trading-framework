@@ -68,6 +68,14 @@ class Strategy(ABC):
     def trades(self, symbol: str) -> Iterator[Trade]:
         """Yield Trade objects for the given symbol."""
 
+    def signal(self, pit_df: pd.DataFrame, symbol: str) -> "Trade | None":
+        """Return a Trade for the last row of *pit_df* if it qualifies, else None.
+
+        Override this to support point-in-time replay via replay_strategy().
+        The default raises NotImplementedError.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement signal()")
+
 
 # ── Gap Strategy ──────────────────────────────────────────────────────────────
 
@@ -131,6 +139,63 @@ class GapStrategy(Strategy):
                 exit_reason=reason, strategy=self.name,
             )
 
+    def signal(self, pit_df: pd.DataFrame, symbol: str) -> "Trade | None":
+        """Return a Trade for the last row of *pit_df* if it qualifies, else None.
+
+        *pit_df* must be a point-in-time slice (all rows up to and including
+        the day being evaluated), sorted ascending by date.
+        """
+        df = pit_df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+        if len(df) < 2:
+            return None
+
+        row      = df.iloc[-1]
+        prev_row = df.iloc[-2]
+
+        gap_pct = (row["Open"] - prev_row["Close"]) / prev_row["Close"] * 100
+        if gap_pct < self.threshold:
+            return None
+
+        ema50     = float(df["Close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        ema12     = df["Close"].ewm(span=12, adjust=False).mean()
+        ema26     = df["Close"].ewm(span=26, adjust=False).mean()
+        macd      = ema12 - ema26
+        macd_bull = (macd - macd.ewm(span=9, adjust=False).mean()).iloc[-1] > 0
+        vol_avg20 = float(df["Volume"].rolling(20).mean().iloc[-1])
+
+        if row["Volume"] < vol_avg20 * 1.5:
+            return None
+        if prev_row["Close"] < ema50:
+            return None
+        if not macd_bull:
+            return None
+
+        entry  = round(float(row["Open"]) * (1 + SLIPPAGE), 2)
+        sl     = round(float(prev_row["Close"]) * 1.002, 2)
+        t2     = round(float(row["Open"]) * (1 + gap_pct * 2 / 100), 2)
+        t1     = round(float(row["Open"]) * (1 + gap_pct / 100), 2)
+        qty    = max(1, int(CAPITAL * POSITION_PCT / entry))
+
+        low, high, close = float(row["Low"]), float(row["High"]), float(row["Close"])
+
+        if low <= sl:
+            exit_p, reason = sl, "SL"
+        elif high >= t2:
+            exit_p, reason = t2, "T2"
+        elif high >= t1:
+            trail  = round(high * 0.995, 2)
+            exit_p = max(trail, close)
+            reason = "Trail"
+        else:
+            exit_p, reason = close, "Close"
+
+        ts = df.index[-1]
+        return Trade(
+            symbol=symbol, entry_dt=ts, exit_dt=ts,
+            entry=entry, exit=exit_p, qty=qty,
+            exit_reason=reason, strategy=self.name,
+        )
+
 
 # ── Intraday ML Strategy ──────────────────────────────────────────────────────
 
@@ -178,7 +243,7 @@ class IntradayMLStrategy(Strategy):
         if not self._load():
             return
 
-        from india_intraday_model import build_features, DATA_DIR
+        from models.india_intraday_model import build_features, DATA_DIR
         sym = symbol.replace(".NS", "").replace("-", "_")
         path = DATA_DIR / f"{sym}.parquet"
         if not path.exists():

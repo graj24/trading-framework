@@ -32,7 +32,7 @@ def test_fo_expiry_uses_previous_trading_day_when_thursday_is_holiday(monkeypatc
     confirm `_fo_expiry_days` shifts to the previous trading day.
     """
     from core import holidays
-    from india_intraday_model import _fo_expiry_days
+    from models.india_intraday_model import _fo_expiry_days
 
     # 2024-05-30 is the last Thursday of May 2024. Pretend it's a holiday.
     fake_holidays = frozenset(holidays.NSE_HOLIDAYS | {date(2024, 5, 30)})
@@ -49,7 +49,7 @@ def test_fo_expiry_uses_previous_trading_day_when_thursday_is_holiday(monkeypatc
 def test_fo_expiry_unchanged_when_thursday_is_trading_day():
     """Sanity: when the last Thursday is a normal trading day, expiry
     stays on Thursday."""
-    from india_intraday_model import _fo_expiry_days
+    from models.india_intraday_model import _fo_expiry_days
 
     # 2025-08-28 — last Thursday of August 2025; not in NSE_HOLIDAYS.
     idx = pd.DatetimeIndex([pd.Timestamp("2025-08-25 10:00:00")])

@@ -36,7 +36,7 @@ def _save_incumbent(path: Path, auc: float):
 
 class TestDailyPromotionGate:
     def test_no_incumbent_always_saves(self, tmp_path, monkeypatch):
-        import ml_model
+        import models.ml_model as ml_model
         monkeypatch.setattr(ml_model, "MODEL_PATH", tmp_path / "model.pkl")
         X, y = _make_val()
         result = ml_model._save_if_better(_trained_dummy(), ["f1", "f2"], 0.65, X, y)
@@ -44,7 +44,7 @@ class TestDailyPromotionGate:
         assert (tmp_path / "model.pkl").exists()
 
     def test_better_model_saves(self, tmp_path, monkeypatch):
-        import ml_model
+        import models.ml_model as ml_model
         path = tmp_path / "model.pkl"
         monkeypatch.setattr(ml_model, "MODEL_PATH", path)
         # Incumbent with AUC stored as 0.50; new model claims 0.65
@@ -56,7 +56,7 @@ class TestDailyPromotionGate:
             assert pickle.load(f)["auc"] == pytest.approx(0.65)
 
     def test_worse_model_rejected(self, tmp_path, monkeypatch):
-        import ml_model
+        import models.ml_model as ml_model
         path = tmp_path / "model.pkl"
         monkeypatch.setattr(ml_model, "MODEL_PATH", path)
         _save_incumbent(path, auc=0.80)
@@ -69,7 +69,7 @@ class TestDailyPromotionGate:
 
     def test_within_delta_saves(self, tmp_path, monkeypatch):
         """new_auc == incumbent_auc + MIN_AUC_DELTA should be accepted."""
-        import ml_model
+        import models.ml_model as ml_model
         path = tmp_path / "model.pkl"
         monkeypatch.setattr(ml_model, "MODEL_PATH", path)
         _save_incumbent(path, auc=0.60)
@@ -79,7 +79,7 @@ class TestDailyPromotionGate:
         assert result is True
 
     def test_saved_payload_includes_auc(self, tmp_path, monkeypatch):
-        import ml_model
+        import models.ml_model as ml_model
         path = tmp_path / "model.pkl"
         monkeypatch.setattr(ml_model, "MODEL_PATH", path)
         X, y = _make_val()
@@ -94,7 +94,7 @@ class TestDailyPromotionGate:
 
 class TestIntradayPromotionGate:
     def test_no_incumbent_always_saves(self, tmp_path, monkeypatch):
-        import india_intraday_model as iim
+        import models.india_intraday_model as iim
         monkeypatch.setattr(iim, "MODEL_PATH", tmp_path / "model.pkl")
         X, y = _make_val()
         result = iim._save_if_better(_trained_dummy(), ["f1", "f2"], 0.65, X, y)
@@ -102,7 +102,7 @@ class TestIntradayPromotionGate:
         assert (tmp_path / "model.pkl").exists()
 
     def test_worse_model_rejected(self, tmp_path, monkeypatch):
-        import india_intraday_model as iim
+        import models.india_intraday_model as iim
         path = tmp_path / "model.pkl"
         monkeypatch.setattr(iim, "MODEL_PATH", path)
         _save_incumbent(path, auc=0.80)
@@ -111,7 +111,7 @@ class TestIntradayPromotionGate:
         assert result is False
 
     def test_saved_payload_includes_auc(self, tmp_path, monkeypatch):
-        import india_intraday_model as iim
+        import models.india_intraday_model as iim
         path = tmp_path / "model.pkl"
         monkeypatch.setattr(iim, "MODEL_PATH", path)
         X, y = _make_val()

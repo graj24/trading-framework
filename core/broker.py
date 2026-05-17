@@ -172,13 +172,18 @@ class ZerodhaBroker(Broker):
 def get_broker(config: dict) -> Broker:
     """Factory: returns the right Broker based on config.trading.mode/broker."""
     mode   = config["trading"]["mode"]
-    broker = config.get("trading", {}).get("broker", "zerodha").lower()
+    broker = config.get("trading", {}).get("broker", "").lower()
 
     if mode == "paper":
         return PaperBroker()
     elif mode == "shadow":
         return ShadowBroker()
     elif mode == "live":
+        if not broker:
+            raise ValueError(
+                "config.trading.broker must be set when mode=live. "
+                "Valid values: zerodha, upstox, angelone."
+            )
         import os
         if broker == "upstox":
             return UpstoxBroker(
@@ -321,6 +326,8 @@ class ShadowBroker(Broker):
                     symbol, paper_fill, live_fill, slippage_bps,
                 )
         self._fill_log.append(entry)
+        if len(self._fill_log) > 1000:
+            self._fill_log = self._fill_log[-1000:]
         return paper_id   # callers track the paper ID
 
     def cancel_order(self, order_id: str) -> bool:

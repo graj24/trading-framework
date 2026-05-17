@@ -11,7 +11,7 @@ import pytest
 def test_market_data_cache_hit_avoids_yfinance(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    import ml_model
+    import models.ml_model as ml_model
 
     # First call: stub yfinance to return a known series, write the cache.
     fetch_calls = {"n": 0}
@@ -46,7 +46,7 @@ def test_market_data_cache_hit_avoids_yfinance(tmp_path, monkeypatch):
 def test_cache_refetches_when_range_extends(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    import ml_model
+    import models.ml_model as ml_model
 
     fetch_calls = {"n": 0}
 

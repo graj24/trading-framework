@@ -15,6 +15,7 @@ All functions return empty DataFrames gracefully when data is missing.
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
@@ -22,7 +23,8 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-STOCKS_DIR  = Path("stocks")
+from core.knowledge_base import STOCKS_DIR
+
 MARKET_FILE = STOCKS_DIR / "_market_data.parquet"
 
 
@@ -34,6 +36,7 @@ def _conn():
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+@lru_cache(maxsize=256)
 def _index_col(path: Path) -> str:
     """Return the name of the index column in a parquet file."""
     try:
@@ -168,10 +171,19 @@ def query(sql: str) -> pd.DataFrame:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
+def _validate_date(value: str) -> None:
+    """Raise ValueError if *value* is not a plain YYYY-MM-DD string."""
+    import re
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError(f"Invalid date string (expected YYYY-MM-DD): {value!r}")
+
+
 def _date_where(col: str, start: str | None, end: str | None) -> str:
     parts = []
     if start:
+        _validate_date(start)
         parts.append(f"CAST({col} AS DATE) >= DATE '{start}'")
     if end:
+        _validate_date(end)
         parts.append(f"CAST({col} AS DATE) <= DATE '{end}'")
     return (" WHERE " + " AND ".join(parts)) if parts else ""
