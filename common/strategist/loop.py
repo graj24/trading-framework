@@ -78,6 +78,15 @@ class Strategist:
         strategy_name = (state["active_strategy"] or {}).get("name", "blank")
         watchlist = state["watchlist"]
 
+        # Load PM identity (trading philosophy) if exists
+        identity = ""
+        try:
+            id_path = Path(f"pm_{self.pm_id}/identity.md")
+            if id_path.exists():
+                identity = "\n\n## YOUR IDENTITY\n" + id_path.read_text()
+        except Exception:
+            pass
+
         cold_start = ""
         if strategy_name == "blank" and state.get("active_version") == 1:
             cold_start = """
@@ -102,7 +111,7 @@ Use your tools. Read files. Search the web. Write code. Then commit to a directi
 
         return f"""You are PM{self.pm_id}, an autonomous portfolio manager competing against other PMs.
 Your goal: generate more P&L than every other PM. You have full access to tools.
-IMPORTANT: All prices are in Indian Rupees (₹). Never use $ or USD. Use ₹ for all prices and P&L.
+IMPORTANT: All prices are in Indian Rupees (₹). Never use $ or USD. Use ₹ for all prices and P&L.{identity}
 
 TRIGGER: {trigger}
 TIME: {datetime.now().strftime('%Y-%m-%d %H:%M IST')}
