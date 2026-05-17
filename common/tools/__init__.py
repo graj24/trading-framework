@@ -44,6 +44,10 @@ def _safe_read_path(pm_id: str, path: str) -> Path:
         _APP_ROOT / "config.yaml",
         _APP_ROOT / "requirements.txt",
     ]
+    # Also allow reading other PMs' workspaces (strategies, journal — for competitive intel)
+    # but never their .env or secrets
+    for d in _APP_ROOT.glob("pm_*/"):
+        allowed.append(d)
     if not any(str(p).startswith(str(a)) for a in allowed):
         raise PermissionError(f"read_file: path '{path}' is outside allowed zones")
     # Never expose secrets
@@ -220,14 +224,14 @@ def sql_query(pm_id: str, sql: str) -> str:
 
 def memory_store(pm_id: str, key: str, content: str) -> str:
     """Store a research finding in PM's persistent memory."""
-    from common.memory.store import get_store
+    from common.memory import get_store
     get_store(pm_id).put(key, content)
     return f"OK: stored '{key}' in memory"
 
 
 def memory_search(pm_id: str, query: str, top_k: int = 5) -> str:
     """Search PM's persistent memory for relevant past findings."""
-    from common.memory.store import get_store
+    from common.memory import get_store
     results = get_store(pm_id).search(query, top_k=top_k)
     if not results:
         return "No relevant memories found."
