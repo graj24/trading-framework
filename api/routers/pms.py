@@ -300,3 +300,39 @@ def kill_switch_on(reason: str = "manual via UI"):
 def kill_switch_off():
     deactivate_kill_switch()
     return {"active": False}
+
+
+# ── Leaderboard ───────────────────────────────────────────────────────────────
+
+@router.get("/leaderboard")
+def get_leaderboard(window_days: int = Query(30, ge=1, le=365)):
+    """Return all PMs ranked by P&L."""
+    from common.leaderboard.snapshot import get_leaderboard as _lb
+    return _lb(window_days=window_days)
+
+
+@router.get("/{pm_id}/rivals")
+def get_rivals(pm_id: str, window_days: int = Query(30, ge=1, le=365)):
+    """Return rival PMs' stats from the perspective of pm_id."""
+    from common.leaderboard.snapshot import get_leaderboard as _lb, get_rival_snapshot
+    board = _lb(window_days=window_days)
+    rivals = [p for p in board if p["pm_id"] != pm_id]
+    return {"self_pm": pm_id, "rivals": rivals}
+
+
+@router.get("/{pm_id}/strategies")
+def list_strategies(pm_id: str):
+    """List all strategy versions for a PM."""
+    from common.strategy.registry import list_versions, get_active_version
+    return {
+        "pm_id": pm_id,
+        "active_version": get_active_version(pm_id),
+        "versions": list_versions(pm_id),
+    }
+
+
+@router.get("/{pm_id}/strategies/diff")
+def strategy_diff(pm_id: str, v_a: int = Query(...), v_b: int = Query(...)):
+    """Return unified diff between two strategy versions."""
+    from common.strategy.registry import diff
+    return {"diff": diff(pm_id, v_a, v_b)}

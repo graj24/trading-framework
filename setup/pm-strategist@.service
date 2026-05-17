@@ -1,0 +1,20 @@
+[Unit]
+Description=PM%i Strategist Brain
+After=network.target trading-daemon.service
+PartOf=trading-daemon.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/app
+Environment=PYTHONPATH=/app
+EnvironmentFile=/app/.env
+ExecStart=/app/.venv/bin/python -m common.strategist --pm_id %i
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pm-strategist-%i
+
+[Install]
+WantedBy=multi-user.target
