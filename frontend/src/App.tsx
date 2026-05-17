@@ -12,6 +12,7 @@ import { Infra } from "@/pages/Infra";
 import { PMCockpit } from "@/pages/PMCockpit";
 import { PMs } from "@/pages/PMs";
 import { Leaderboard } from "@/pages/Leaderboard";
+import { Architecture } from "@/pages/Architecture";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
 const qc = new QueryClient({ defaultOptions: { queries: { retry: 1, staleTime: 30000 } } });
@@ -35,6 +36,7 @@ function AppShell() {
             <Route path="/pms" element={<PMs />} />
             <Route path="/pms/:pmId" element={<PMCockpit />} />
             <Route path="/leaderboard" element={<Leaderboard />} />
+            <Route path="/architecture" element={<Architecture />} />
           </Routes>
         </main>
       </div>
