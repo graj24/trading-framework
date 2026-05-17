@@ -379,14 +379,13 @@ Return ONLY valid JSON."""
         cursor = int(self._cursor_path.read_text().strip()) if self._cursor_path.exists() else get_bus().latest_id()
         logger.info(f"PM{self.pm_id} Strategist started — cursor={cursor}, interval={interval_min}min")
 
-        # Stagger PMs so they don't fire simultaneously.
-        # PM1 starts immediately; PM2 waits half the interval.
-        stagger = (int(self.pm_id) - 1) * (interval_min * 60 / 2)
-        if stagger > 0:
-            logger.info(f"PM{self.pm_id} staggering {stagger:.0f}s to avoid rate limit collision")
-            time.sleep(stagger)
-
-        last_interval_cycle = time.time()
+        # Stagger PMs by offsetting when they consider their last interval cycle.
+        # PM1: fires at t=0, t=15, t=30...
+        # PM2: fires at t=7.5, t=22.5, t=37.5... (half-interval offset)
+        stagger_s = (int(self.pm_id) - 1) * (interval_min * 60 / 2)
+        last_interval_cycle = time.time() - (interval_min * 60 - stagger_s)
+        if stagger_s > 0:
+            logger.info(f"PM{self.pm_id} interval offset {stagger_s:.0f}s (fires in {stagger_s:.0f}s)")
 
         while True:
             try:
