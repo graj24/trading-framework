@@ -200,8 +200,10 @@ When done, return a JSON object as your final message:
                     for tc in msg.tool_calls:
                         fn_name = tc.function.name
                         try:
-                            args = json.loads(tc.function.arguments)
+                            args = json.loads(tc.function.arguments) or {}
                         except Exception:
+                            args = {}
+                        if not isinstance(args, dict):
                             args = {}
                         logger.info(f"PM{self.pm_id} tool: {fn_name}({list(args.keys())})")
                         result = dispatch(self.pm_id, fn_name, args)
@@ -222,7 +224,9 @@ When done, return a JSON object as your final message:
                     for tc in msg.tool_calls:
                         if tc.function.name in ACTIONS:
                             try:
-                                args = json.loads(tc.function.arguments)
+                                args = json.loads(tc.function.arguments) or {}
+                                if not isinstance(args, dict):
+                                    args = {}
                                 # Reconstruct as if it were a plain JSON response
                                 raw = json.dumps({
                                     "action": tc.function.name,
