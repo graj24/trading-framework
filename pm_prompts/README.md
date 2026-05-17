@@ -1,37 +1,43 @@
 # Portfolio Manager Prompts
 
-Each file in this folder is the system prompt / identity document for one Portfolio Manager (PM) agent.
+Each PM is an autonomous LLM agent competing to generate the highest returns on the Indian equity market. They share the same codebase, the same data, and the same trade ledger — but each has full freedom to build their own strategy.
 
-## What is a PM?
+## Files
 
-A PM is an LLM agent that autonomously manages a paper trading portfolio on the Indian equity market (NSE). Each PM has:
-- Its own strategy (simple or complex — entirely up to the PM)
-- Access to the full codebase, all agents, all data, and the broker abstraction
-- Full freedom to create new agents, install packages, or build a completely different stack
-- One goal: make more money than the other PMs
+| File | Purpose |
+|---|---|
+| `TEMPLATE.md` | Generic system prompt for any new PM — covers identity, framework access, freedom, and scoreboard |
+| `PM1.md` | PM1's inherited strategy (handoff from human PM to AI PM) |
+| `PM2.md` | PM2's competitive context vs PM1 |
 
-## Current PMs
+## Creating a new PM
 
-| PM | File | Strategy summary |
-|---|---|---|
-| PM1 | `PM1.md` | Multi-signal pipeline: technical + FinBERT + DTW patterns + regime + 2 ML models + LLM arbitration |
-| PM2 | `PM2.md` | Competes against PM1 — full freedom to exploit PM1's weaknesses |
+1. Copy `TEMPLATE.md` — fill in `{PM_NAME}` and `{id}`
+2. Add a competitor context section (show it the other PMs' strategies and their weaknesses)
+3. Save as `PM<N>.md`
+4. Give the full prompt (`TEMPLATE.md` + `PM<N>.md`) to the LLM agent
 
-## Adding a new PM
+## How to use these prompts
 
-1. Create `PM<N>.md` in this folder
-2. Give it an identity, show it the other PMs' strategies, and set it loose
-3. Each PM should have its own entry point (e.g. `pm2/main.py`) and config
-4. All PMs write to the same `paper_trades.db` — P&L is tracked per PM via a `pm_id` tag
+Concatenate the template with the PM-specific file:
+
+```
+[TEMPLATE.md content]
+
+---
+
+[PM<N>.md content]
+```
+
+That's the full system prompt for the agent.
 
 ## Scoreboard
 
 ```bash
 sqlite3 paper_trades.db "
-  SELECT reasoning LIKE '%PM%' as pm, COUNT(*) trades,
-         SUM(pnl_inr) total_pnl
-  FROM trades WHERE outcome != 'open'
-  GROUP BY 1
-  ORDER BY total_pnl DESC;
+SELECT pm_id, COUNT(*) trades, SUM(pnl_inr) total_pnl,
+       ROUND(100.0 * SUM(CASE WHEN pnl_inr > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) win_rate_pct
+FROM trades WHERE outcome != 'open'
+GROUP BY pm_id ORDER BY total_pnl DESC;
 "
 ```
