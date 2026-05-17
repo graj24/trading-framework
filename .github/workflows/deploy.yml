@@ -1,0 +1,35 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /app
+
+            # Pull latest code
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Rebuild frontend only if it changed
+            if git diff HEAD@{1} HEAD --name-only | grep -q "^frontend/"; then
+              cd /app/frontend && npm ci --silent && npm run build
+              cd /app
+            fi
+
+            # Restart services
+            sudo systemctl restart trading-api
+            sudo systemctl restart trading-daemon
+
+            echo "Deploy complete"
