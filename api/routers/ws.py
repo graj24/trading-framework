@@ -52,12 +52,46 @@ async def _mock_feed():
             })
 
 
+def _nse_price(session, sym: str) -> tuple[float, float] | None:
+    """Fetch price + prev_close from NSE. Returns (price, prev_close) or None."""
+    try:
+        r = session.get(
+            f"https://www.nseindia.com/api/quote-equity?symbol={sym}",
+            timeout=5
+        )
+        if r.status_code != 200:
+            return None
+        pi = r.json().get("priceInfo", {})
+        price = pi.get("lastPrice") or pi.get("close")
+        prev = pi.get("previousClose") or pi.get("close")
+        if not price:
+            return None
+        return float(price), float(prev or price)
+    except Exception:
+        return None
+
+
+def _make_nse_session():
+    import requests as _req
+    s = _req.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://www.nseindia.com",
+    })
+    try:
+        s.get("https://www.nseindia.com", timeout=5)
+    except Exception:
+        pass
+    return s
+
+
 async def _real_feed():
-    """Push real yfinance prices for the full watchlist every 60s."""
-    import yfinance as yf
+    """Push real NSE prices for the full watchlist every 60s."""
     from core.config import get_config
 
-    prev_prices: dict = {}
+    session = _make_nse_session()
+    loop = asyncio.get_event_loop()
 
     while True:
         await asyncio.sleep(60)
@@ -66,35 +100,19 @@ async def _real_feed():
         try:
             config = get_config()
             symbols = config.get("watchlist", [])[:50]
-            tickers = [f"{s}.NS" for s in symbols]
 
-            # Batch download — much faster than one-by-one
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(
-                None,
-                lambda: yf.download(tickers, period="2d", auto_adjust=True, progress=False, threads=True)
-            )
-
-            close = data.get("Close") if hasattr(data, "get") else data["Close"] if "Close" in data else None
-            if close is None or close.empty:
-                continue
-
-            for sym in symbols:
-                ticker = f"{sym}.NS"
-                try:
-                    col = close[ticker] if ticker in close.columns else None
-                    if col is None or col.dropna().empty:
-                        continue
-                    vals = col.dropna()
-                    price = float(vals.iloc[-1])
-                    prev = float(vals.iloc[-2]) if len(vals) > 1 else prev_prices.get(sym, price)
+            async def _fetch_and_broadcast(sym):
+                result = await loop.run_in_executor(None, _nse_price, session, sym)
+                if result:
+                    price, prev = result
                     change_pct = round((price - prev) / prev * 100, 2) if prev else 0.0
-                    prev_prices[sym] = price
-                    await broadcast({"type": "ltp_update", "symbol": sym, "price": price, "change_pct": change_pct})
-                except Exception:
-                    continue
+                    await broadcast({"type": "ltp_update", "symbol": sym,
+                                     "price": price, "change_pct": change_pct})
+
+            await asyncio.gather(*[_fetch_and_broadcast(s) for s in symbols])
         except Exception as e:
             logger.warning(f"Real feed error: {e}")
+            session = _make_nse_session()
 
 
 _feed_task: asyncio.Task | None = None
@@ -114,34 +132,23 @@ async def websocket_live(ws: WebSocket):
     try:
         # Send initial snapshot immediately on connect
         try:
-            import yfinance as yf
             from core.config import get_config
             config = get_config()
             symbols = config.get("watchlist", [])[:50]
-            tickers = [f"{s}.NS" for s in symbols]
+            snap_session = _make_nse_session()
             loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(
-                None,
-                lambda: yf.download(tickers, period="2d", auto_adjust=True, progress=False, threads=True)
-            )
-            close = data["Close"] if "Close" in data else None
-            if close is not None and not close.empty:
-                for sym in symbols:
-                    ticker = f"{sym}.NS"
-                    try:
-                        col = close[ticker] if ticker in close.columns else None
-                        if col is None or col.dropna().empty:
-                            continue
-                        vals = col.dropna()
-                        price = float(vals.iloc[-1])
-                        prev = float(vals.iloc[-2]) if len(vals) > 1 else price
-                        change_pct = round((price - prev) / prev * 100, 2) if prev else 0.0
-                        await ws.send_text(json.dumps({
-                            "type": "ltp_update", "symbol": sym,
-                            "price": price, "change_pct": change_pct,
-                        }))
-                    except Exception:
-                        continue
+
+            async def _snap(sym):
+                result = await loop.run_in_executor(None, _nse_price, snap_session, sym)
+                if result:
+                    price, prev = result
+                    change_pct = round((price - prev) / prev * 100, 2) if prev else 0.0
+                    await ws.send_text(json.dumps({
+                        "type": "ltp_update", "symbol": sym,
+                        "price": price, "change_pct": change_pct,
+                    }))
+
+            await asyncio.gather(*[_snap(s) for s in symbols])
         except Exception as e:
             logger.warning(f"Initial snapshot failed: {e}")
 

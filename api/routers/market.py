@@ -49,17 +49,32 @@ def get_sectors():
 
 @router.get("/ltp/{symbol}")
 def get_ltp(symbol: str):
+    import requests as _req
+    sym = symbol.upper()
     try:
-        t = yf.Ticker(symbol.upper() + ".NS")
-        hist = t.history(period="2d")
-        if hist.empty:
-            return {"symbol": symbol, "price": None}
-        price = float(hist["Close"].iloc[-1])
-        prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else price
-        return {
-            "symbol": symbol.upper(),
-            "price": price,
-            "change_pct": round((price - prev) / prev * 100, 2),
-        }
-    except Exception as e:
-        return {"symbol": symbol, "price": None, "error": str(e)}
+        s = _req.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                           "Referer": "https://www.nseindia.com"})
+        s.get("https://www.nseindia.com", timeout=5)
+        r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}", timeout=5)
+        if r.status_code == 200:
+            pi = r.json().get("priceInfo", {})
+            price = pi.get("lastPrice") or pi.get("close")
+            prev = pi.get("previousClose") or price
+            if price:
+                return {"symbol": sym, "price": float(price),
+                        "change_pct": round((float(price) - float(prev)) / float(prev) * 100, 2)}
+    except Exception:
+        pass
+    # Fallback to yfinance
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(sym + ".NS").history(period="2d")
+        if not hist.empty:
+            price = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else price
+            return {"symbol": sym, "price": price,
+                    "change_pct": round((price - prev) / prev * 100, 2)}
+    except Exception:
+        pass
+    return {"symbol": sym, "price": None}
