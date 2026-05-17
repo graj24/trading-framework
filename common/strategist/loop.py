@@ -169,14 +169,53 @@ Decide what to do this cycle. Return ONLY valid JSON:
         logger.info(f"PM{self.pm_id} Strategist → exec_order: {symbol} {details.get('direction','BUY')}")
 
     def _handle_research(self, details: dict):
-        """Publish research event for the PM Researcher daemon."""
+        """Run inline research: ask LLM the question with watchlist context, write findings to journal."""
         from common.core.event_bus import get_bus
+        from common.core.pm_state import append_journal
+
+        question = details.get("question", "").strip()
+        priority = details.get("priority", "medium")
+
+        # Always emit the event for any external consumers (researcher daemon when added)
         get_bus().publish(
             f"research.{self.pm_id}",
-            {"question": details.get("question", ""), "priority": details.get("priority", "medium")},
-            pm_id=self.pm_id,
-            severity="INFO",
+            {"question": question, "priority": priority},
+            pm_id=self.pm_id, severity="INFO",
         )
+
+        if not question:
+            return
+
+        # Run inline research via LLM so the next cycle can act on findings
+        try:
+            import litellm
+            state = self._read_state()
+            watchlist = state.get("watchlist", [])[:20]
+            prompt = (
+                f"You are PM{self.pm_id}'s research analyst.\n"
+                f"Question: {question}\n"
+                f"Watchlist: {watchlist}\n\n"
+                "Provide a concise (≤120 words) actionable research note covering:\n"
+                "- Top 1–3 NSE symbols from the watchlist that match the question\n"
+                "- Why (technical setup, sector momentum, or news angle)\n"
+                "- A specific entry/exit hypothesis you would test next cycle\n"
+                "Be direct. No preamble."
+            )
+            resp = litellm.completion(
+                model="groq/llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=300,
+                temperature=0.3,
+            )
+            findings = resp.choices[0].message.content.strip()
+            append_journal(
+                self.pm_id,
+                f"**Research finding** ({priority}): {question}\n\n{findings}",
+            )
+            logger.info(f"PM{self.pm_id} research complete: {findings[:80]}…")
+        except Exception as e:
+            logger.warning(f"PM{self.pm_id} inline research failed: {e}")
+            append_journal(self.pm_id, f"**Research queued** ({priority}): {question} — LLM unavailable")
 
     def _handle_evolve(self, details: dict, state: dict):
         """Ask LLM to propose a strategy diff, backtest it, commit if Sharpe improves."""
