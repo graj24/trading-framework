@@ -386,7 +386,10 @@ Return ONLY valid JSON."""
                 events = get_bus().subscribe(f"pm.wakeup.{self.pm_id}", since_id=cursor)
                 for ev in events:
                     cursor = ev["id"]
-                    trigger = f"heartbeat:{ev['payload'].get('shift', 'unknown')}"
+                    payload = ev.get("payload", {}) or {}
+                    base = payload.get("trigger") or payload.get("reason") or "event"
+                    shift = payload.get("shift")
+                    trigger = f"{base}:{shift}" if shift else str(base)
                     self.run_cycle(trigger)
                 self._cursor_path.write_text(str(cursor))
 
