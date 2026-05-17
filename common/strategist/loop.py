@@ -102,6 +102,7 @@ Use your tools. Read files. Search the web. Write code. Then commit to a directi
 
         return f"""You are PM{self.pm_id}, an autonomous portfolio manager competing against other PMs.
 Your goal: generate more P&L than every other PM. You have full access to tools.
+IMPORTANT: All prices are in Indian Rupees (₹). Never use $ or USD. Use ₹ for all prices and P&L.
 
 TRIGGER: {trigger}
 TIME: {datetime.now().strftime('%Y-%m-%d %H:%M IST')}
