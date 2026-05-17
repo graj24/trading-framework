@@ -55,12 +55,15 @@ FRONTEND_DIST = ROOT / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     from fastapi.responses import FileResponse
 
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
+
     @app.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
         """Serve index.html for all non-API routes (SPA client-side routing)."""
+        if full_path.startswith("api/"):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404)
         file = FRONTEND_DIST / full_path
         if file.is_file():
             return FileResponse(str(file))
         return FileResponse(str(FRONTEND_DIST / "index.html"))
-
-    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
