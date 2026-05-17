@@ -12,6 +12,7 @@ import pandas as pd
 import yaml
 
 from agents.base import Agent, AgentResult, AgentStatus
+from core import migrations  # noqa: F401  ensure paper_trades.db schema is up-to-date
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.yaml"
@@ -60,7 +61,7 @@ def _get_pm_pnl(pm_id: str, db_path: str = "paper_trades.db") -> dict:
             (pm_id,),
         ).fetchone()[0]
         capital_row = conn.execute(
-            "SELECT COALESCE(SUM(entry_price*quantity),1) FROM trades WHERE pm_id=?",
+            "SELECT COALESCE(SUM(entry_price*position_size),1) FROM trades WHERE pm_id=?",
             (pm_id,),
         ).fetchone()[0] or 1
     return {

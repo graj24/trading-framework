@@ -14,6 +14,7 @@ from core.pm_state import (
     read_inbox, read_positions, read_proposals, read_team,
 )
 from core.broker import is_kill_switch_active, activate_kill_switch, deactivate_kill_switch
+from core import migrations  # noqa: F401  schema migration
 
 router = APIRouter(prefix="/api/pms", tags=["pms"])
 

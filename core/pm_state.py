@@ -24,6 +24,8 @@ from typing import Any
 
 import yaml
 
+from core import migrations  # noqa: F401  schema migration
+
 BASE = Path(".")
 
 
