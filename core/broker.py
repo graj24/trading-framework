@@ -13,11 +13,13 @@ from typing import Optional
 
 import yfinance as yf
 
+from core.costs import BROKERAGE_FRAC, STT_SELL_FRAC
+
 logger = logging.getLogger(__name__)
 
-BROKERAGE_PCT = 0.0003   # 0.03% per side
-BROKERAGE_MAX = 20.0     # ₹20 max per order
-STT_SELL_PCT = 0.001     # 0.1% STT on sell
+BROKERAGE_PCT = BROKERAGE_FRAC   # alias kept for internal use
+BROKERAGE_MAX = 20.0              # ₹20 max per order
+STT_SELL_PCT  = STT_SELL_FRAC
 
 
 class Broker(ABC):

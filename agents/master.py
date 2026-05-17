@@ -362,20 +362,10 @@ class MasterAgent(Agent):
 
         if decision == "BUY":
             # Get real period PNL and open positions for risk checks
-            from agents.execution_agent import get_period_pnl_pct
-            import sqlite3 as _sqlite3
-            from pathlib import Path as _Path
-            weekly_pnl  = get_period_pnl_pct(7)
-            monthly_pnl = get_period_pnl_pct(30)
-            open_positions = []
-            _db = _Path("paper_trades.db")
-            if _db.exists():
-                with _sqlite3.connect(_db) as _conn:
-                    open_positions = [
-                        r[0] for r in _conn.execute(
-                            "SELECT symbol FROM trades WHERE outcome='open'"
-                        ).fetchall()
-                    ]
+            from agents.execution_agent import get_period_pnl_pct, get_open_position_symbols
+            weekly_pnl     = get_period_pnl_pct(7)
+            monthly_pnl    = get_period_pnl_pct(30)
+            open_positions = get_open_position_symbols()
             risk_result = self.risk_manager.run({
                 "symbol": symbol,
                 "entry_price": price,
