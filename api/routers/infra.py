@@ -10,9 +10,19 @@ from fastapi import APIRouter
 router = APIRouter(prefix="/api/infra", tags=["infra"])
 
 
-def _run(cmd: str) -> str:
+def _imds(path: str) -> str:
+    """Fetch EC2 instance metadata using IMDSv2."""
     try:
-        return subprocess.check_output(cmd, shell=True, text=True, timeout=5).strip()
+        token = subprocess.check_output(
+            'curl -sf --max-time 2 -X PUT "http://169.254.169.254/latest/api/token" '
+            '-H "X-aws-ec2-metadata-token-ttl-seconds: 21600"',
+            shell=True, text=True, timeout=5,
+        ).strip()
+        return subprocess.check_output(
+            f'curl -sf --max-time 2 -H "X-aws-ec2-metadata-token: {token}" '
+            f'http://169.254.169.254/latest/meta-data/{path}',
+            shell=True, text=True, timeout=5,
+        ).strip()
     except Exception:
         return "unknown"
 
@@ -75,19 +85,11 @@ def get_infra():
     git_commit = _run("cd /app && git log --oneline -1 2>/dev/null")
     git_branch = _run("cd /app && git rev-parse --abbrev-ref HEAD 2>/dev/null")
 
-    # Instance metadata (available on EC2)
-    instance_id = _run(
-        "curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/instance-id"
-    )
-    instance_type = _run(
-        "curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/instance-type"
-    )
-    public_ip = _run(
-        "curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/public-ipv4"
-    )
-    region = _run(
-        "curl -sf --max-time 2 http://169.254.169.254/latest/meta-data/placement/region"
-    )
+    # Instance metadata (IMDSv2)
+    instance_id   = _imds("instance-id")
+    instance_type = _imds("instance-type")
+    public_ip     = _imds("public-ipv4")
+    region        = _imds("placement/region")
 
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
