@@ -22,6 +22,9 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
+            # Remove dev .env.local so production build uses relative URLs
+            rm -f /app/frontend/.env.local
+
             # Rebuild frontend only if it changed
             if git diff HEAD@{1} HEAD --name-only | grep -q "^frontend/"; then
               cd /app/frontend && npm ci --silent && npm run build
