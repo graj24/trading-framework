@@ -94,6 +94,26 @@ class RegimeAgent(Agent):
 
             strategy_adjustments = STRATEGY_ADJUSTMENTS[regime]
 
+            # Stage 3b: probabilistic regime via GaussianMixture.
+            # If the model is trained, attach soft probabilities to the result
+            # so downstream code can weight signals by P(bull) rather than
+            # doing a hard regime == 'bull' check. Falls back gracefully.
+            regime_proba: dict = {}
+            try:
+                from models.regime_model import predict_proba as _gmm_proba
+                proba = _gmm_proba(
+                    ret_20d=ret_20d,
+                    vol_20d=volatility,
+                    vix=vix_val if vix_val else 16.0,
+                )
+                if proba is not None:
+                    regime_proba = proba
+                    # Consensus regime = arg max of GMM proba (may differ from rule).
+                    regime = max(proba, key=proba.get)
+                    confidence = round(proba[regime], 3)
+            except Exception:
+                pass  # model not trained yet — keep rule-based values
+
             return self._result({
                 'regime': regime,
                 'confidence': round(confidence, 3),
@@ -102,6 +122,7 @@ class RegimeAgent(Agent):
                 'return_20d': round(ret_20d, 2),
                 'india_vix': round(vix_val, 2) if vix_val else None,
                 'strategy_adjustments': strategy_adjustments,
+                'regime_proba': regime_proba,   # {} when GMM not trained
             })
         except Exception as e:
             logger.exception("RegimeAgent failed")
