@@ -223,41 +223,47 @@ def sql_query(pm_id: str, sql: str) -> str:
 
 
 def get_prices(pm_id: str, symbols: list) -> str:
-    """Fetch current NSE prices for a list of symbols."""
-    import requests as _req
+    """Fetch current NSE prices for a list of symbols from shared price cache."""
+    import common.pricing as pricing
     results = []
-    try:
-        s = _req.Session()
-        s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json",
-                           "Referer": "https://www.nseindia.com"})
-        s.get("https://www.nseindia.com", timeout=5)
-    except Exception:
-        s = None
+    missing = []
 
+    cached = pricing.get_many([str(s) for s in symbols[:15]])
     for sym in symbols[:15]:
+        p = cached.get(sym.upper())
+        if p:
+            stale_note = " [stale]" if p["stale"] else ""
+            results.append(f"{sym}: ₹{p['price']:.2f} ({p['change_pct']:+.2f}%){stale_note}")
+        else:
+            missing.append(sym.upper())
+
+    # Direct fetch only for symbols not in cache (feed daemon may not have them yet)
+    if missing:
         try:
-            if s:
-                r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}", timeout=5)
-                if r.status_code == 200:
-                    pi = r.json().get("priceInfo", {})
-                    price = pi.get("lastPrice") or pi.get("close")
-                    prev = pi.get("previousClose") or price
-                    if price:
-                        chg = (float(price) - float(prev)) / float(prev) * 100 if prev else 0
-                        results.append(f"{sym}: ₹{float(price):.2f} ({chg:+.2f}%)")
-                        continue
-            # yfinance fallback
-            import yfinance as yf
-            h = yf.Ticker(f"{sym}.NS").history(period="2d")
-            if not h.empty:
-                close = float(h["Close"].iloc[-1])
-                prev = float(h["Close"].iloc[-2]) if len(h) > 1 else close
-                chg = (close - prev) / prev * 100 if prev else 0
-                results.append(f"{sym}: ₹{close:.2f} ({chg:+.2f}%)")
-            else:
+            import requests as _req
+            s = _req.Session()
+            s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json",
+                               "Referer": "https://www.nseindia.com"})
+            s.get("https://www.nseindia.com", timeout=5)
+            for sym in missing:
+                try:
+                    r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}", timeout=5)
+                    if r.status_code == 200:
+                        pi = r.json().get("priceInfo", {})
+                        price = pi.get("lastPrice") or pi.get("close")
+                        prev = pi.get("previousClose") or price
+                        if price:
+                            pricing.upsert(sym, float(price), float(prev or price))
+                            chg = (float(price) - float(prev)) / float(prev) * 100 if prev else 0
+                            results.append(f"{sym}: ₹{float(price):.2f} ({chg:+.2f}%)")
+                            continue
+                except Exception:
+                    pass
                 results.append(f"{sym}: no data")
         except Exception as e:
-            results.append(f"{sym}: error ({e})")
+            for sym in missing:
+                results.append(f"{sym}: error ({e})")
+
     return "\n".join(results) if results else "No price data available"
 
 

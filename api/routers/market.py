@@ -49,9 +49,14 @@ def get_sectors():
 
 @router.get("/ltp/{symbol}")
 def get_ltp(symbol: str):
-    import requests as _req
+    import common.pricing as pricing
     sym = symbol.upper()
+    cached = pricing.get(sym)
+    if cached and not cached["stale"]:
+        return {"symbol": sym, "price": cached["price"], "change_pct": cached["change_pct"]}
+    # Cache miss or stale — fall back to direct NSE fetch (rare, only if feed daemon is down)
     try:
+        import requests as _req
         s = _req.Session()
         s.headers.update({"User-Agent": "Mozilla/5.0", "Accept": "application/json",
                            "Referer": "https://www.nseindia.com"})
@@ -62,19 +67,12 @@ def get_ltp(symbol: str):
             price = pi.get("lastPrice") or pi.get("close")
             prev = pi.get("previousClose") or price
             if price:
+                pricing.upsert(sym, float(price), float(prev or price))
                 return {"symbol": sym, "price": float(price),
                         "change_pct": round((float(price) - float(prev)) / float(prev) * 100, 2)}
     except Exception:
         pass
-    # Fallback to yfinance
-    try:
-        import yfinance as yf
-        hist = yf.Ticker(sym + ".NS").history(period="2d")
-        if not hist.empty:
-            price = float(hist["Close"].iloc[-1])
-            prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else price
-            return {"symbol": sym, "price": price,
-                    "change_pct": round((price - prev) / prev * 100, 2)}
-    except Exception:
-        pass
+    # Return stale cache if available rather than None
+    if cached:
+        return {"symbol": sym, "price": cached["price"], "change_pct": cached["change_pct"], "stale": True}
     return {"symbol": sym, "price": None}

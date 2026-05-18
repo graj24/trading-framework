@@ -87,32 +87,28 @@ def _make_nse_session():
 
 
 async def _real_feed():
-    """Push real NSE prices for the full watchlist every 60s."""
+    """Push prices from shared cache every 30s. No direct NSE calls."""
     from core.config import get_config
-
-    session = _make_nse_session()
-    loop = asyncio.get_event_loop()
+    import common.pricing as pricing
 
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
         if not _clients:
             continue
         try:
             config = get_config()
             symbols = config.get("watchlist", [])[:50]
-
-            async def _fetch_and_broadcast(sym):
-                result = await loop.run_in_executor(None, _nse_price, session, sym)
-                if result:
-                    price, prev = result
-                    change_pct = round((price - prev) / prev * 100, 2) if prev else 0.0
-                    await broadcast({"type": "ltp_update", "symbol": sym,
-                                     "price": price, "change_pct": change_pct})
-
-            await asyncio.gather(*[_fetch_and_broadcast(s) for s in symbols])
+            prices = pricing.get_many(symbols)
+            for sym, p in prices.items():
+                if not p["stale"]:
+                    await broadcast({
+                        "type": "ltp_update",
+                        "symbol": sym,
+                        "price": p["price"],
+                        "change_pct": p["change_pct"],
+                    })
         except Exception as e:
-            logger.warning(f"Real feed error: {e}")
-            session = _make_nse_session()
+            logger.warning(f"Feed broadcast error: {e}")
 
 
 _feed_task: asyncio.Task | None = None
@@ -130,25 +126,17 @@ async def websocket_live(ws: WebSocket):
         _feed_task = asyncio.create_task(_real_feed())
 
     try:
-        # Send initial snapshot immediately on connect
+        # Send initial snapshot from cache immediately on connect
         try:
+            import common.pricing as pricing
             from core.config import get_config
-            config = get_config()
-            symbols = config.get("watchlist", [])[:50]
-            snap_session = _make_nse_session()
-            loop = asyncio.get_event_loop()
-
-            async def _snap(sym):
-                result = await loop.run_in_executor(None, _nse_price, snap_session, sym)
-                if result:
-                    price, prev = result
-                    change_pct = round((price - prev) / prev * 100, 2) if prev else 0.0
-                    await ws.send_text(json.dumps({
-                        "type": "ltp_update", "symbol": sym,
-                        "price": price, "change_pct": change_pct,
-                    }))
-
-            await asyncio.gather(*[_snap(s) for s in symbols])
+            symbols = get_config().get("watchlist", [])[:50]
+            prices = pricing.get_many(symbols)
+            for sym, p in prices.items():
+                await ws.send_text(json.dumps({
+                    "type": "ltp_update", "symbol": sym,
+                    "price": p["price"], "change_pct": p["change_pct"],
+                }))
         except Exception as e:
             logger.warning(f"Initial snapshot failed: {e}")
 

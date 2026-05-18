@@ -1,0 +1,17 @@
+[Unit]
+Description=Trading Framework Price Feed Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/app
+EnvironmentFile=/app/.env
+ExecStart=/app/.venv/bin/python -m agents.price_feed
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

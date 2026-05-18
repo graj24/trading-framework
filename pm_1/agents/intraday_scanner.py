@@ -51,29 +51,24 @@ NIFTY50 = [
 ]
 
 def get_all_nifty50_ltps() -> dict[str, float]:
-    """Fetch live LTP for all 50 NIFTY stocks in one Groww API call."""
-    try:
-        from core.groww_client import get_groww_client
-        client = get_groww_client()
-        # Groww supports up to 50 per call
-        ltps = client.get_ltp(NIFTY50)
-        if ltps:
-            logger.debug(f"Groww: fetched {len(ltps)} LTPs")
-            return ltps
-    except Exception as e:
-        logger.debug(f"Groww LTP failed: {e}")
-    # Fallback: yfinance for watchlist only
+    """Return LTPs from shared price cache (populated by price-feed daemon)."""
+    import common.pricing as pricing
+    cached = pricing.get_many(NIFTY50)
+    if cached:
+        return {sym: p["price"] for sym, p in cached.items()}
+    # Fallback: direct NSE fetch if cache is empty (daemon not running)
     result = {}
     try:
-        import yaml
-        with open("config.yaml") as f:
-            cfg = yaml.safe_load(f)
-        for sym in cfg.get("watchlist", []):
+        s = requests.Session()
+        s.get("https://www.nseindia.com", headers=HEADERS, timeout=TIMEOUT)
+        for sym in NIFTY50[:20]:
             try:
-                t = yf.Ticker(sym + ".NS")
-                h = t.history(period="1d")
-                if not h.empty:
-                    result[sym] = float(h["Close"].iloc[-1])
+                r = s.get(f"https://www.nseindia.com/api/quote-equity?symbol={sym}", timeout=5)
+                if r.status_code == 200:
+                    pi = r.json().get("priceInfo", {})
+                    price = pi.get("lastPrice") or pi.get("close")
+                    if price:
+                        result[sym] = float(price)
             except Exception:
                 pass
     except Exception:
@@ -84,7 +79,18 @@ def get_all_nifty50_ltps() -> dict[str, float]:
 # ── Live Price from NSE ───────────────────────────────────────────────────────
 
 def get_nse_quote(symbol: str) -> dict:
-    """Fetch live quote from NSE (LTP, volume, OHLC)."""
+    """Fetch live quote — reads from shared price cache, falls back to direct NSE."""
+    import common.pricing as pricing
+    cached = pricing.get(symbol)
+    if cached and not cached["stale"]:
+        return {
+            "symbol": symbol,
+            "ltp": cached["price"],
+            "prev_close": cached["prev_close"],
+            "open": 0, "high": 0, "low": 0, "volume": 0, "vwap": 0,
+            "fetched_at": datetime.now().isoformat(),
+        }
+    # Cache miss — direct NSE fetch
     try:
         s = requests.Session()
         s.get("https://www.nseindia.com", headers=HEADERS, timeout=TIMEOUT)
@@ -92,13 +98,17 @@ def get_nse_quote(symbol: str) -> dict:
         resp = s.get(url, headers=HEADERS, timeout=TIMEOUT)
         data = resp.json()
         pd_data = data.get("priceInfo", {})
+        price = pd_data.get("lastPrice", 0)
+        prev = pd_data.get("previousClose", 0)
+        if price:
+            pricing.upsert(symbol, float(price), float(prev or price))
         return {
             "symbol": symbol,
-            "ltp": pd_data.get("lastPrice", 0),
+            "ltp": price,
             "open": pd_data.get("open", 0),
             "high": pd_data.get("intraDayHighLow", {}).get("max", 0),
             "low": pd_data.get("intraDayHighLow", {}).get("min", 0),
-            "prev_close": pd_data.get("previousClose", 0),
+            "prev_close": prev,
             "volume": data.get("marketDeptOrderBook", {}).get("tradeInfo", {}).get("totalTradedVolume", 0),
             "vwap": pd_data.get("vwap", 0),
             "fetched_at": datetime.now().isoformat(),
