@@ -165,8 +165,8 @@ When done, return a JSON object as your final message:
 
             cfg = get_config()
             model = cfg.get("llm", {}).get("model", "groq/llama-3.3-70b-versatile")
-            if trigger.startswith("interval:"):
-                model = cfg.get("llm", {}).get("cheap_model", "groq/llama-3.1-8b-instant")
+            # Note: 70b-versatile has 12000 TPM on free tier vs 6000 for 8b-instant
+            # so we use the same model for off-shift to avoid rate limits.
 
             messages = [{"role": "system", "content": self._system_prompt(state, rival, trigger)}]
             tools = get_tool_schemas()
@@ -210,7 +210,7 @@ When done, return a JSON object as your final message:
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc.id,
-                            "content": str(result)[:4000],
+                            "content": str(result)[:1500],
                         })
                         tool_calls_made += 1
                     continue
