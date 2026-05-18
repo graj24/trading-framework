@@ -25,6 +25,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:
+    from datetime import timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+
 logger = logging.getLogger(__name__)
 
 # Valid final actions
@@ -114,7 +121,7 @@ Your goal: generate more P&L than every other PM. You have full access to tools.
 IMPORTANT: All prices are in Indian Rupees (₹). Never use $ or USD. Use ₹ for all prices and P&L.{identity}
 
 TRIGGER: {trigger}
-TIME: {datetime.now().strftime('%Y-%m-%d %H:%M IST')}
+TIME: {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}
 
 CURRENT STRATEGY: {strategy_name} (v{state['active_version']})
 WATCHLIST: {watchlist}
@@ -354,7 +361,7 @@ Return ONLY valid JSON."""
     # ── Cycle ─────────────────────────────────────────────────────────────────
 
     def run_cycle(self, trigger: str = "manual") -> dict:
-        ts = datetime.now()
+        ts = datetime.now(IST)
         logger.info(f"PM{self.pm_id} Strategist cycle start [{trigger}]")
         self._emit_thinking("start", f"Starting cycle [{trigger}]")
 

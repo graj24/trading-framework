@@ -24,6 +24,13 @@ from typing import Any
 
 import yaml
 
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:
+    from datetime import timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+
 from common.core import migrations  # noqa: F401  schema migration
 
 BASE = Path(".")
@@ -116,7 +123,7 @@ def write_tasks(pm_id: str, tasks: dict):
 
 def append_journal(pm_id: str, entry: str):
     p = _ws(pm_id) / "journal.md"
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M IST")
+    ts = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
     p.open("a").write(f"\n## {ts}\n{entry.strip()}\n")
 
 
@@ -188,7 +195,7 @@ def build_wakeup_context(pm_id: str, shift: str = "") -> str:
 
     lines = [
         f"# PM{pm_id} Wakeup Context",
-        f"Shift: {shift}  |  Time: {datetime.now().strftime('%Y-%m-%d %H:%M IST')}",
+        f"Shift: {shift}  |  Time: {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}",
         "",
         "## Current Plan",
         plan or "(none)",
