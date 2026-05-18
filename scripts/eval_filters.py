@@ -289,6 +289,18 @@ FILTERS: List[Filter] = [
     Filter("composite_buy_gate",
            lambda f: f["trend_up"] & f["macd_bullish"] & (f["vol_ratio_20"] >= 1.0),
            "Hard gate: trend_up AND MACD_bullish AND vol_ratio>=1.0"),
+    # Stage 3a: sentiment quality
+    Filter("sentiment_fresh",
+           lambda f: f["quality"].str.match("fresh") if "quality" in f.columns else pd.Series(False, index=f.index),
+           "Sentiment quality == 'fresh' (Stage 3a)"),
+    # Stage 3b: probabilistic regime
+    Filter("regime_bull_proba_ge_50",
+           lambda f: f.get("regime_bull_proba", pd.Series(0.0, index=f.index)) >= 0.5,
+           "P(trending_bull) >= 0.50 (Stage 3b GMM)"),
+    # Stage 4: learned tech score
+    Filter("learned_tech_proba_ge_55",
+           lambda f: f.get("learned_tech_proba", pd.Series(0.0, index=f.index)) >= 0.55,
+           "Learned tech score P(fwd>1.5%) >= 0.55 (Stage 4)"),
 ]
 
 
