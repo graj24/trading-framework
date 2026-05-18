@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -29,6 +30,101 @@ from core.knowledge_base import kb_path
 from core import features as F
 
 logger = logging.getLogger(__name__)
+
+# ── Stage 2 constants ─────────────────────────────────────────────────────────
+
+# Cooldown: number of bars to wait before re-firing the same pattern on the
+# same symbol. With 5-minute bars this is 30 minutes by default — long enough
+# to prevent flooding the decision pipeline with duplicate signals when a
+# breakout sits just above its trigger for an hour.
+COOLDOWN_BARS = 6
+
+# Built-in fallback "confidence" numbers. Used only if the empirical-stats
+# JSON file isn't present (it's produced by `scripts/backtest_intraday_detectors.py`).
+# These match the legacy hardcoded values for backward compatibility, but
+# mirror exactly the comment in the docstring for each detector.
+_DETECTOR_DEFAULT_CONFIDENCE = {
+    "bull_flag":               75,
+    "vwap_reclaim":            70,
+    "accumulation_at_support": 65,
+    "volume_spike":            60,
+    "resistance_breakout":     80,
+    "rsi_divergence":          70,
+}
+
+# Path to the backtest-derived stats JSON, populated by Stage 2C's backtester.
+_EMPIRICAL_STATS_PATH = Path(__file__).resolve().parent.parent / "models" / "intraday_detector_stats.json"
+_empirical_stats_cache: Optional[dict] = None
+
+
+def _load_empirical_stats() -> dict:
+    """Lazy-load the per-detector hit-rate stats produced by the backtester.
+
+    Schema:
+        {
+          "<detector_name>": {
+              "overall":          0.62,                 # all conditions
+              "<regime>":         0.71,                 # by regime
+              "<regime>_<hour>":  0.78,                 # by regime × hour
+              ...
+          }, ...
+        }
+
+    Returns {} if the file doesn't exist or is malformed — callers fall back
+    to `_DETECTOR_DEFAULT_CONFIDENCE`.
+    """
+    global _empirical_stats_cache
+    if _empirical_stats_cache is not None:
+        return _empirical_stats_cache
+    import json
+    if _EMPIRICAL_STATS_PATH.exists():
+        try:
+            _empirical_stats_cache = json.loads(_EMPIRICAL_STATS_PATH.read_text())
+            return _empirical_stats_cache
+        except Exception as e:
+            logger.warning(f"Failed to load empirical stats: {e}")
+    _empirical_stats_cache = {}
+    return _empirical_stats_cache
+
+
+def _empirical_confidence(detector_name: str,
+                          regime: str = "unknown",
+                          hour: Optional[int] = None) -> int:
+    """Empirical hit-rate %, falling back to the legacy hardcoded value if
+    no backtest stats are available.
+
+    Lookup order: regime+hour, regime, overall, fallback.
+    """
+    stats = _load_empirical_stats()
+    det = stats.get(detector_name, {})
+    fallback = _DETECTOR_DEFAULT_CONFIDENCE.get(detector_name, 50)
+    if not det:
+        return fallback
+    if hour is not None:
+        key = f"{regime}_{hour}"
+        if key in det:
+            return int(round(det[key] * 100))
+    if regime in det:
+        return int(round(det[regime] * 100))
+    if "overall" in det:
+        return int(round(det["overall"] * 100))
+    return fallback
+
+
+def _compute_atr_pct(df: pd.DataFrame, period: int = 14) -> float:
+    """Latest ATR as a percentage of latest close. Used to scale per-symbol
+    pattern thresholds — a 1.5% bull-flag pole on RELIANCE (ATR≈1%) is a
+    different signal from a 1.5% pole on a small-cap (ATR≈3%).
+    Returns 1.0 (neutral, no scaling) if ATR isn't computable yet.
+    """
+    if len(df) < period:
+        return 1.0
+    atr = F.atr(df["High"], df["Low"], df["Close"], period).iloc[-1]
+    close = df["Close"].iloc[-1]
+    if pd.isna(atr) or close == 0:
+        return 1.0
+    return float(atr / close * 100)
+
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
@@ -128,10 +224,15 @@ def get_intraday_candles(symbol: str) -> Optional[pd.DataFrame]:
 
 # ── Pattern Detection ─────────────────────────────────────────────────────────
 
-def detect_bull_flag(df: pd.DataFrame) -> Optional[dict]:
+def detect_bull_flag(df: pd.DataFrame, atr_pct: float = 1.0) -> Optional[dict]:
     """
     Bull Flag: strong up candle (pole) → 3-5 tight candles → breakout above pole high.
-    Entry: breakout candle close
+    Entry: breakout candle close.
+
+    Stage 2B: thresholds scale with the symbol's 14-bar ATR. A 1.5% pole on a
+    typical large-cap (ATR≈1%) becomes a 1.5×1.0=1.5% threshold; on a more
+    volatile name (ATR≈3%) the same multiplier yields 4.5% — preventing
+    spurious detections on noisy stocks.
     """
     if len(df) < 8:
         return None
@@ -139,19 +240,22 @@ def detect_bull_flag(df: pd.DataFrame) -> Optional[dict]:
     volumes = df["Volume"].values
     highs = df["High"].values
 
-    # Find pole: single candle with >1.5% gain and above-avg volume
+    pole_gain_min  = 1.5 * atr_pct
+    flag_range_max = 1.5 * atr_pct
+
+    # Find pole: single candle with >= adaptive gain and above-avg volume
     avg_vol = volumes.mean()
     for i in range(2, len(df) - 4):
         pole_gain = (closes[i] - closes[i-1]) / closes[i-1] * 100
-        if pole_gain < 1.5 or volumes[i] < avg_vol * 1.5:
+        if pole_gain < pole_gain_min or volumes[i] < avg_vol * 1.5:
             continue
 
-        # Flag: next 3-5 candles consolidate (range < 0.5% of pole high)
+        # Flag: next 3-5 candles consolidate (range <= adaptive)
         flag_candles = df.iloc[i+1:i+5]
         if len(flag_candles) < 3:
             continue
         flag_range = (flag_candles["High"].max() - flag_candles["Low"].min()) / closes[i] * 100
-        if flag_range > 1.5:
+        if flag_range > flag_range_max:
             continue
 
         # Breakout: latest candle breaks above pole high
@@ -160,13 +264,13 @@ def detect_bull_flag(df: pd.DataFrame) -> Optional[dict]:
         if latest_close > pole_high and volumes[-1] > avg_vol:
             return {
                 "pattern": "bull_flag",
-                "confidence": 75,
                 "pole_gain": round(pole_gain, 2),
                 "flag_range": round(flag_range, 2),
+                "atr_pct": round(atr_pct, 3),
                 "breakout_price": round(latest_close, 2),
                 "target": round(latest_close * (1 + pole_gain / 100), 2),
                 "stop_loss": round(flag_candles["Low"].min() * 0.999, 2),
-                "description": f"Bull flag: {pole_gain:.1f}% pole, {flag_range:.1f}% flag, breakout confirmed",
+                "description": f"Bull flag: {pole_gain:.1f}% pole, {flag_range:.1f}% flag, breakout (atr={atr_pct:.2f}%)",
             }
     return None
 
@@ -176,6 +280,14 @@ def detect_vwap_reclaim(df: pd.DataFrame, quote: dict) -> Optional[dict]:
     VWAP Reclaim: price dips below VWAP then closes back above with volume.
     Strong intraday signal — institutions use VWAP as benchmark.
     """
+def detect_vwap_reclaim(df: pd.DataFrame, quote: dict, atr_pct: float = 1.0) -> Optional[dict]:
+    """
+    VWAP Reclaim: price dips below VWAP then closes back above with volume.
+    Strong intraday signal — institutions use VWAP as benchmark.
+
+    Stage 2B: takes atr_pct for API consistency (no thresholds to scale here —
+    volume gate is already adaptive via the rolling mean).
+    """
     if len(df) < 6 or not quote.get("vwap"):
         return None
 
@@ -184,7 +296,6 @@ def detect_vwap_reclaim(df: pd.DataFrame, quote: dict) -> Optional[dict]:
     volumes = df["Volume"].values
     avg_vol = volumes.mean()
 
-    # Check last 3 candles: dipped below VWAP then reclaimed
     if len(closes) < 3:
         return None
 
@@ -195,7 +306,6 @@ def detect_vwap_reclaim(df: pd.DataFrame, quote: dict) -> Optional[dict]:
     if dipped and reclaimed and volume_confirm:
         return {
             "pattern": "vwap_reclaim",
-            "confidence": 70,
             "vwap": round(vwap, 2),
             "current_price": round(closes[-1], 2),
             "target": round(vwap * 1.015, 2),
@@ -205,10 +315,11 @@ def detect_vwap_reclaim(df: pd.DataFrame, quote: dict) -> Optional[dict]:
     return None
 
 
-def detect_accumulation_at_support(df: pd.DataFrame) -> Optional[dict]:
+def detect_accumulation_at_support(df: pd.DataFrame, atr_pct: float = 1.0) -> Optional[dict]:
     """
-    Accumulation: price tests same support level 3+ times with rising volume each time.
-    Classic institutional accumulation pattern.
+    Accumulation: price tests same support level 3+ times with rising volume.
+
+    Stage 2B: support tolerance scales with stock ATR.
     """
     if len(df) < 10:
         return None
@@ -217,40 +328,42 @@ def detect_accumulation_at_support(df: pd.DataFrame) -> Optional[dict]:
     volumes = df["Volume"].values
     closes = df["Close"].values
 
-    # Find support level (cluster of lows within 0.3%)
+    # Adaptive tolerance: 0.3% × atr_pct (so a 1% ATR stock gets 0.3% tolerance,
+    # a 3% ATR stock gets 0.9% — wider clusters for volatile names).
+    tol_pct = 0.003 * atr_pct
+
     for i in range(2, len(lows) - 2):
         support = lows[i]
-        tolerance = support * 0.003
+        tolerance = support * tol_pct
 
-        # Count touches of this support level
         touches = [(j, lows[j], volumes[j]) for j in range(len(lows))
                    if abs(lows[j] - support) <= tolerance]
 
         if len(touches) < 3:
             continue
 
-        # Check volume is rising on each touch (accumulation)
         touch_vols = [t[2] for t in touches]
         vol_rising = touch_vols[-1] > touch_vols[0]
 
-        # Price currently above support (not breaking down)
         if closes[-1] > support and vol_rising:
             return {
                 "pattern": "accumulation_at_support",
-                "confidence": 65,
                 "support_level": round(support, 2),
                 "touches": len(touches),
+                "atr_pct": round(atr_pct, 3),
                 "target": round(closes[-1] * 1.02, 2),
                 "stop_loss": round(support * 0.997, 2),
-                "description": f"Accumulation at ₹{support:.2f} support ({len(touches)} touches, rising volume)",
+                "description": f"Accumulation at ₹{support:.2f} support ({len(touches)} touches, rising volume, atr={atr_pct:.2f}%)",
             }
     return None
 
 
-def detect_volume_spike(df: pd.DataFrame, quote: dict) -> Optional[dict]:
+def detect_volume_spike(df: pd.DataFrame, quote: dict, atr_pct: float = 1.0) -> Optional[dict]:
     """
     Volume Spike: current candle volume is 3× the 20-candle average.
-    Signals institutional activity — follow the direction.
+
+    Stage 2B: takes atr_pct for API consistency. The 3× volume gate is
+    already adaptive in nature (it's a ratio, not an absolute level).
     """
     if len(df) < 5:
         return None
@@ -270,7 +383,6 @@ def detect_volume_spike(df: pd.DataFrame, quote: dict) -> Optional[dict]:
     if ratio >= 3.0 and direction == "up":
         return {
             "pattern": "volume_spike",
-            "confidence": 60,
             "volume_ratio": round(ratio, 1),
             "direction": direction,
             "target": round(current_close * 1.015, 2),
@@ -280,9 +392,11 @@ def detect_volume_spike(df: pd.DataFrame, quote: dict) -> Optional[dict]:
     return None
 
 
-def detect_resistance_breakout(df: pd.DataFrame) -> Optional[dict]:
+def detect_resistance_breakout(df: pd.DataFrame, atr_pct: float = 1.0) -> Optional[dict]:
     """
     Resistance Breakout: price breaks above a level it failed at 3+ times.
+
+    Stage 2B: cluster tolerance scales with stock ATR.
     """
     if len(df) < 12:
         return None
@@ -292,49 +406,46 @@ def detect_resistance_breakout(df: pd.DataFrame) -> Optional[dict]:
     volumes = df["Volume"].values
     avg_vol = volumes.mean()
 
-    # Find resistance (cluster of highs within 0.3%)
+    tol_pct = 0.003 * atr_pct
+
     for i in range(2, len(highs) - 3):
         resistance = highs[i]
-        tolerance = resistance * 0.003
+        tolerance = resistance * tol_pct
 
-        # Count rejections at this level
         rejections = [j for j in range(len(highs) - 1)
                       if abs(highs[j] - resistance) <= tolerance and closes[j] < resistance]
 
         if len(rejections) < 2:
             continue
 
-        # Latest candle breaks above resistance with volume
         if closes[-1] > resistance and volumes[-1] > avg_vol * 1.3:
             return {
                 "pattern": "resistance_breakout",
-                "confidence": 80,
                 "resistance_level": round(resistance, 2),
                 "rejections": len(rejections),
+                "atr_pct": round(atr_pct, 3),
                 "breakout_price": round(closes[-1], 2),
                 "target": round(closes[-1] * 1.02, 2),
                 "stop_loss": round(resistance * 0.997, 2),
-                "description": f"Breakout above ₹{resistance:.2f} resistance ({len(rejections)} prior rejections)",
+                "description": f"Breakout above ₹{resistance:.2f} resistance ({len(rejections)} prior rejections, atr={atr_pct:.2f}%)",
             }
     return None
 
 
-def detect_rsi_divergence(df: pd.DataFrame) -> Optional[dict]:
+def detect_rsi_divergence(df: pd.DataFrame, atr_pct: float = 1.0) -> Optional[dict]:
     """
     Bullish RSI Divergence: price making lower lows but RSI making higher lows.
-    Signals momentum shift — reversal likely.
+
+    Stage 2B: takes atr_pct for API consistency (no scalable thresholds here).
     """
     if len(df) < 20:
         return None
 
     closes = df["Close"]
-    # Stage 0: use canonical Wilder's RSI from core.features. The previous
-    # local SMA-based formula was inconsistent with the rest of the codebase.
+    # Canonical Wilder's RSI from core.features (Stage 0).
     rsi = F.rsi(closes, period=14).values
-
     prices = closes.values
 
-    # Find two recent lows in price
     price_lows = []
     for i in range(2, len(prices) - 1):
         if prices[i] < prices[i-1] and prices[i] < prices[i+1]:
@@ -345,11 +456,9 @@ def detect_rsi_divergence(df: pd.DataFrame) -> Optional[dict]:
 
     p1, p2 = price_lows[-2], price_lows[-1]
 
-    # Bullish divergence: price lower low but RSI higher low
     if p2[1] < p1[1] and p2[2] > p1[2] and not np.isnan(p2[2]):
         return {
             "pattern": "rsi_divergence",
-            "confidence": 70,
             "price_low_1": round(p1[1], 2),
             "price_low_2": round(p2[1], 2),
             "rsi_low_1": round(p1[2], 1),
@@ -363,8 +472,22 @@ def detect_rsi_divergence(df: pd.DataFrame) -> Optional[dict]:
 
 # ── Scanner ───────────────────────────────────────────────────────────────────
 
-def scan_stock(symbol: str) -> dict:
-    """Run all pattern detectors on a single stock."""
+def scan_stock(symbol: str,
+               cooldown_state: Optional[dict] = None,
+               regime: str = "unknown") -> dict:
+    """Run all pattern detectors on a single stock.
+
+    Stage 2A/B/C wired in here:
+      - Adaptive thresholds: atr_pct computed once and passed to each detector
+        so the per-symbol detection sensitivity scales with the stock's
+        recent volatility.
+      - Cooldown: a pattern that already fired for this symbol within the
+        last COOLDOWN_BARS bars is suppressed. State is held by the caller
+        (IntradayPatternScanner instance) so it survives across scan cycles.
+      - Empirical confidence: each fired pattern's `confidence` field is set
+        from the backtest-derived stats file if present, else falls back to
+        the legacy hardcoded value. Cuts the dependency on guessed numbers.
+    """
     quote = get_nse_quote(symbol)
     df = get_intraday_candles(symbol)
 
@@ -375,6 +498,7 @@ def scan_stock(symbol: str) -> dict:
         "patterns": [],
         "best_pattern": None,
         "signal": "WATCH",
+        "regime": regime,
         "scanned_at": datetime.now().isoformat(),
     }
 
@@ -382,21 +506,57 @@ def scan_stock(symbol: str) -> dict:
         result["signal"] = "NO_DATA"
         return result
 
-    # Run all detectors
-    detectors = [
-        detect_resistance_breakout(df),
-        detect_bull_flag(df),
-        detect_vwap_reclaim(df, quote),
-        detect_accumulation_at_support(df),
-        detect_rsi_divergence(df),
-        detect_volume_spike(df, quote),
+    atr_pct = _compute_atr_pct(df)
+    last_bar_ts = df.index[-1]
+    hour = last_bar_ts.hour
+    result["atr_pct"] = round(atr_pct, 3)
+
+    # Run all detectors — each takes atr_pct and (optionally) the live quote.
+    raw = [
+        detect_resistance_breakout(df, atr_pct=atr_pct),
+        detect_bull_flag(df, atr_pct=atr_pct),
+        detect_vwap_reclaim(df, quote, atr_pct=atr_pct),
+        detect_accumulation_at_support(df, atr_pct=atr_pct),
+        detect_rsi_divergence(df, atr_pct=atr_pct),
+        detect_volume_spike(df, quote, atr_pct=atr_pct),
     ]
 
-    patterns = [p for p in detectors if p is not None]
+    # Cooldown filter + empirical confidence annotation.
+    # NOTE: `cooldown_state or {}` is wrong here — an empty dict is falsy
+    # in Python, so that idiom would return a fresh dict and lose mutations.
+    if cooldown_state is None:
+        sym_cooldown: dict = {}
+    else:
+        sym_cooldown = cooldown_state.setdefault(symbol, {})
+
+    patterns = []
+    for r in raw:
+        if r is None:
+            continue
+        name = r["pattern"]
+
+        # Cooldown: skip if same pattern fired recently for this symbol.
+        last_fire_ts = sym_cooldown.get(name)
+        if last_fire_ts is not None:
+            try:
+                bars_since = max(
+                    0,
+                    df.index.get_indexer([last_bar_ts])[0]
+                    - df.index.get_indexer([last_fire_ts])[0],
+                )
+            except Exception:
+                bars_since = 0
+            if bars_since < COOLDOWN_BARS:
+                continue   # suppress re-fire
+        sym_cooldown[name] = last_bar_ts
+
+        # Empirical hit-rate as confidence (fallback to legacy default).
+        r["confidence"] = _empirical_confidence(name, regime=regime, hour=hour)
+        patterns.append(r)
+
     result["patterns"] = patterns
 
     if patterns:
-        # Pick highest confidence pattern
         best = max(patterns, key=lambda x: x["confidence"])
         result["best_pattern"] = best
         result["signal"] = "BUY" if best["confidence"] >= 65 else "WATCH"
@@ -414,6 +574,10 @@ class IntradayPatternScanner(Agent):
     def __init__(self, config: dict):
         super().__init__("IntradayPatternScanner", config)
         self.watchlist = config.get("watchlist", [])
+        # Per-instance cooldown state survives across scan_all() calls.
+        # Shape: {symbol: {pattern_name: last_fire_timestamp}}
+        self._cooldown_state: dict = {}
+        self._current_regime: str = "unknown"
 
     def run(self, context=None) -> AgentResult:
         return self._result(self.scan_all())
@@ -454,7 +618,8 @@ class IntradayPatternScanner(Agent):
         # Pass 2: deep pattern scan on candidates
         results = []
         for sym, ltp, move in candidates[:20]:  # cap at 20 for speed
-            r = scan_stock(sym)
+            r = scan_stock(sym, cooldown_state=self._cooldown_state,
+                            regime=self._current_regime)
             r["intraday_move_pct"] = round(move, 2)
             results.append(r)
             if r["patterns"]:
