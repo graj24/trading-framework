@@ -75,7 +75,7 @@ def _classify_with_llm(event: dict, pm_id: str) -> str:
     Returns one of: 'ignore', 'exec', 'wakeup', 'research'
     """
     try:
-        import litellm
+        from common.llm import call_text
         topic = event.get("topic", "")
         payload = event.get("payload", {})
 
@@ -100,16 +100,7 @@ def _classify_with_llm(event: dict, pm_id: str) -> str:
             "- research: queue for deeper research\n\n"
             "Reply with only the single word classification."
         )
-        import os
-        resp = litellm.completion(
-            model="openai/nvidia/Kimi-K2-Instruct",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
-            temperature=0,
-            api_base="https://integrate.api.nvidia.com/v1",
-            api_key=os.getenv("NVIDIA_NIM_API_KEY"),
-        )
-        result = resp.choices[0].message.content.strip().lower()
+        result = call_text(prompt, max_tokens=10, temperature=0, tier="triage").lower()
 
         # Emit "thinking" done event
         try:

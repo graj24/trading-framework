@@ -47,8 +47,7 @@ def _rag_context(symbol: str) -> dict:
 def _llm_decision(symbol: str, price: float, scores: dict, rag: dict, config: dict, pm_id: str | None = None) -> dict:
     """Call LLM for trade decision. Falls back to rule-based on failure."""
     try:
-        import litellm
-        llm_cfg = config.get("llm", {})
+        from common.llm import call_text, parse_json_response
 
         # Emit thinking start
         if pm_id:
@@ -109,21 +108,8 @@ EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
             },
         ]
 
-        response = litellm.completion(
-            model=llm_cfg.get("model", "openai/nvidia/Kimi-K2-Instruct"),
-            messages=messages,
-            temperature=llm_cfg.get("temperature", 0.1),
-            max_tokens=200,
-            api_base=llm_cfg.get("api_base", "https://integrate.api.nvidia.com/v1"),
-            api_key=llm_cfg.get("api_key") or __import__("os").getenv("NVIDIA_NIM_API_KEY"),
-        )
-        raw = response.choices[0].message.content.strip()
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        result = json.loads(raw)
+        response = call_text(messages, max_tokens=200, temperature=0.1)
+        result = parse_json_response(response)
 
         # Emit thinking done
         if pm_id:

@@ -166,41 +166,22 @@ When done, return a JSON object as your final message:
     def _decide(self, state: dict, rival: dict, trigger: str) -> dict:
         """Run tool-calling loop until LLM returns a final action JSON."""
         try:
-            import litellm
-            from common.core.config import get_config
+            from common.llm import call as llm_call
             from common.tools import get_tool_schemas, dispatch
-
-            cfg = get_config()
-            model = cfg.get("llm", {}).get("model", "openai/nvidia/Kimi-K2-Instruct")
-            # Note: 70b-versatile has 12000 TPM on free tier vs 6000 for 8b-instant
-            # so we use the same model for off-shift to avoid rate limits.
 
             messages = [{"role": "system", "content": self._system_prompt(state, rival, trigger)}]
             tools = get_tool_schemas()
             tool_calls_made = 0
 
             while tool_calls_made < MAX_TOOL_CALLS:
-                # Retry with backoff on 429
-                for attempt in range(4):
-                    try:
-                        resp = litellm.completion(
-                            model=model,
-                            messages=messages,
-                            tools=tools,
-                            tool_choice="auto",
-                            max_tokens=1000,
-                            temperature=0.2,
-                            api_base=cfg.get("llm", {}).get("api_base", "https://integrate.api.nvidia.com/v1"),
-                            api_key=cfg.get("llm", {}).get("api_key") or __import__("os").getenv("NVIDIA_NIM_API_KEY"),
-                        )
-                        break
-                    except Exception as e:
-                        if "429" in str(e) and attempt < 3:
-                            wait = 2 ** attempt * 5  # 5, 10, 20s
-                            logger.warning(f"PM{self.pm_id} rate limited, retrying in {wait}s")
-                            time.sleep(wait)
-                        else:
-                            raise
+                resp = llm_call(
+                    messages,
+                    tools=tools,
+                    tool_choice="auto",
+                    max_tokens=1000,
+                    temperature=0.2,
+                    tier="strategist",
+                )
                 msg = resp.choices[0].message
 
                 # If LLM made tool calls, execute them and continue
@@ -300,7 +281,7 @@ When done, return a JSON object as your final message:
         if not hypothesis:
             return
         try:
-            import litellm
+            from common.llm import call_text, parse_json_response
             from common.strategy.registry import commit_new_version, load_active, get_active_version
             from common.strategy.backtest_gate import backtest_strategy
 
@@ -317,19 +298,8 @@ name, description, watchlist (NSE symbols list), pipeline, gates (dict), sizing 
 data_sources (list), autonomy (dict: can_short, can_fno, universe).
 
 Return ONLY valid JSON."""
-            resp = litellm.completion(
-                model="openai/nvidia/Kimi-K2-Instruct",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=800, temperature=0.3,
-                api_base="https://integrate.api.nvidia.com/v1",
-                api_key=__import__("os").getenv("NVIDIA_NIM_API_KEY"),
-            )
-            raw = resp.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            new_strategy = json.loads(raw)
+            raw = call_text(prompt, max_tokens=800, temperature=0.3, tier="strategist")
+            new_strategy = parse_json_response(raw)
 
             current_bt = backtest_strategy(current)
             new_bt = backtest_strategy(new_strategy)
