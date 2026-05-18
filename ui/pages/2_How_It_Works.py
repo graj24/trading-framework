@@ -316,7 +316,7 @@ with right:
     steps = [
         ("① Agents run in parallel", "7 agents analyse the stock independently — technical, news, pattern, regime, 2× ML, earnings."),
         ("② MasterAgent aggregates", "Scores are merged into a composite signal. RAG context (fundamentals, past reactions) is retrieved from the knowledge base."),
-        ("③ LLM makes the call", "Groq Llama-3.3-70B receives the full context and returns BUY / HOLD / SKIP with confidence and entry/SL/target."),
+        ("③ LLM makes the call", "NVIDIA NIM Kimi K2 receives the full context and returns BUY / HOLD / SKIP with confidence and entry/SL/target."),
         ("④ Rule fallback", "If the LLM is unavailable, a deterministic rule-based decision runs instead. Same filters apply."),
         ("⑤ Confidence filter", "BUY is blocked if confidence < 60%."),
         ("⑥ Trend + MACD + Volume gate", "BUY requires: trend=up, MACD=bullish, volume ≥ 1× avg. Missing values fail-closed."),

@@ -77,10 +77,12 @@ CORRELATIONS: {dict(top_corr)}
 EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
 
         response = litellm.completion(
-            model=llm_cfg.get("model", "groq/llama-3.3-70b-versatile"),
+            model=llm_cfg.get("model", "openai/nvidia/Kimi-K2-Instruct"),
             messages=[{"role": "user", "content": prompt}],
             temperature=llm_cfg.get("temperature", 0.1),
             max_tokens=200,
+            api_base=llm_cfg.get("api_base"),
+            api_key=llm_cfg.get("api_key") or __import__("os").getenv("NVIDIA_NIM_API_KEY"),
         )
         raw = response.choices[0].message.content.strip()
         # Strip markdown code fences if present

@@ -76,12 +76,14 @@ def patch_env(updates: dict):
 def test_service(service: str):
     service = service.lower()
     try:
-        if service == "groq":
-            import litellm
+        if service in ("groq", "llm", "nvidia_nim"):
+            import litellm, os
             r = litellm.completion(
-                model="groq/llama-3.3-70b-versatile",
+                model="openai/nvidia/Kimi-K2-Instruct",
                 messages=[{"role": "user", "content": "ping"}],
                 max_tokens=5,
+                api_base="https://integrate.api.nvidia.com/v1",
+                api_key=os.getenv("NVIDIA_NIM_API_KEY"),
             )
             return {"status": "ok", "response": r.choices[0].message.content}
         elif service == "market":
