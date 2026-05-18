@@ -102,7 +102,7 @@ def _classify_with_llm(event: dict, pm_id: str) -> str:
         )
         import os
         resp = litellm.completion(
-            model="openai/nvidia/Kimi-K2-Instruct",
+            model="openai/moonshotai/kimi-k2.6",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=10,
             temperature=0,

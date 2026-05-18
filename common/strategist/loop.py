@@ -171,7 +171,7 @@ When done, return a JSON object as your final message:
             from common.tools import get_tool_schemas, dispatch
 
             cfg = get_config()
-            model = cfg.get("llm", {}).get("model", "openai/nvidia/Kimi-K2-Instruct")
+            model = cfg.get("llm", {}).get("model", "openai/moonshotai/kimi-k2.6")
             # Note: 70b-versatile has 12000 TPM on free tier vs 6000 for 8b-instant
             # so we use the same model for off-shift to avoid rate limits.
 
@@ -318,7 +318,7 @@ data_sources (list), autonomy (dict: can_short, can_fno, universe).
 
 Return ONLY valid JSON."""
             resp = litellm.completion(
-                model="openai/nvidia/Kimi-K2-Instruct",
+                model="openai/moonshotai/kimi-k2.6",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=800, temperature=0.3,
                 api_base="https://integrate.api.nvidia.com/v1",

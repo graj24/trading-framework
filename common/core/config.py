@@ -41,7 +41,7 @@ _DEFAULTS: dict[str, Any] = {
         "trailing_stop_distance_pct": 0.5,
         "close_all_time": "15:00",
     },
-    "llm": {"model": "openai/nvidia/Kimi-K2-Instruct",
+    "llm": {"model": "openai/moonshotai/kimi-k2.6",
             "api_base": "https://integrate.api.nvidia.com/v1",
             "max_tokens": 200, "temperature": 0.1},
     "logging": {"level": "INFO", "file": "logs/trading.log",

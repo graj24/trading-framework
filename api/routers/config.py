@@ -79,7 +79,7 @@ def test_service(service: str):
         if service in ("groq", "llm", "nvidia_nim"):
             import litellm, os
             r = litellm.completion(
-                model="openai/nvidia/Kimi-K2-Instruct",
+                model="openai/moonshotai/kimi-k2.6",
                 messages=[{"role": "user", "content": "ping"}],
                 max_tokens=5,
                 api_base="https://integrate.api.nvidia.com/v1",
