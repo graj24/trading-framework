@@ -38,6 +38,44 @@ def _get_conn() -> sqlite3.Connection:
             updated_at  REAL NOT NULL  -- unix timestamp
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ticks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT NOT NULL,
+            price       REAL NOT NULL,
+            change_pct  REAL,
+            ts          REAL NOT NULL   -- unix timestamp
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ticks_symbol_ts ON ticks(symbol, ts)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS candles_5m (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT NOT NULL,
+            ts          REAL NOT NULL,  -- candle open time (unix)
+            open        REAL NOT NULL,
+            high        REAL NOT NULL,
+            low         REAL NOT NULL,
+            close       REAL NOT NULL,
+            ticks       INTEGER DEFAULT 1,
+            UNIQUE(symbol, ts)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_candles_symbol_ts ON candles_5m(symbol, ts)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS candles_1d (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol      TEXT NOT NULL,
+            date        TEXT NOT NULL,  -- YYYY-MM-DD IST
+            open        REAL NOT NULL,
+            high        REAL NOT NULL,
+            low         REAL NOT NULL,
+            close       REAL NOT NULL,
+            prev_close  REAL,
+            ticks       INTEGER DEFAULT 1,
+            UNIQUE(symbol, date)
+        )
+    """)
     conn.commit()
     return conn
 
@@ -127,14 +165,45 @@ def get_all() -> dict[str, dict]:
 # ── Write API (used only by price-feed daemon) ────────────────────────────────
 
 def upsert(symbol: str, price: float, prev_close: float) -> None:
-    """Write a fresh price into the cache."""
+    """Write a fresh price: update snapshot, append tick, update candles."""
     change_pct = round((price - prev_close) / prev_close * 100, 2) if prev_close else 0.0
+    now = time.time()
+    sym = symbol.upper()
     try:
         conn = _get_conn()
+        # 1. Update current snapshot
         conn.execute(
             "INSERT OR REPLACE INTO prices (symbol, price, prev_close, change_pct, updated_at) VALUES (?,?,?,?,?)",
-            (symbol.upper(), price, prev_close, change_pct, time.time())
+            (sym, price, prev_close, change_pct, now)
         )
+        # 2. Append tick (only during market hours to avoid filling DB with stale off-hours data)
+        if is_market_open():
+            conn.execute(
+                "INSERT INTO ticks (symbol, price, change_pct, ts) VALUES (?,?,?,?)",
+                (sym, price, change_pct, now)
+            )
+            # 3. Update 5-min candle (bucket = floor to nearest 5-min boundary)
+            bucket = now - (now % 300)
+            conn.execute("""
+                INSERT INTO candles_5m (symbol, ts, open, high, low, close, ticks)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(symbol, ts) DO UPDATE SET
+                    high  = MAX(high, excluded.high),
+                    low   = MIN(low, excluded.low),
+                    close = excluded.close,
+                    ticks = ticks + 1
+            """, (sym, bucket, price, price, price, price))
+            # 4. Update daily candle
+            date_ist = datetime.now(IST).strftime("%Y-%m-%d")
+            conn.execute("""
+                INSERT INTO candles_1d (symbol, date, open, high, low, close, prev_close, ticks)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(symbol, date) DO UPDATE SET
+                    high      = MAX(high, excluded.high),
+                    low       = MIN(low, excluded.low),
+                    close     = excluded.close,
+                    ticks     = ticks + 1
+            """, (sym, date_ist, price, price, price, price, prev_close))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -155,3 +224,54 @@ def is_market_open() -> bool:
 def poll_interval_seconds() -> int:
     """How often the feed daemon should poll NSE."""
     return 30 if is_market_open() else 300  # 30s in market, 5 min out
+
+
+# ── Candle query helpers (used by PMs, scanner, backtester) ──────────────────
+
+def get_candles_5m(symbol: str, limit: int = 78) -> list[dict]:
+    """Return last N 5-min candles for a symbol (78 = full trading day)."""
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT ts, open, high, low, close, ticks FROM candles_5m "
+            "WHERE symbol=? ORDER BY ts DESC LIMIT ?",
+            (symbol.upper(), limit)
+        ).fetchall()
+        conn.close()
+        return [{"ts": r[0], "open": r[1], "high": r[2], "low": r[3],
+                 "close": r[4], "ticks": r[5]} for r in reversed(rows)]
+    except Exception as e:
+        logger.debug(f"get_candles_5m error: {e}")
+        return []
+
+
+def get_candles_1d(symbol: str, limit: int = 252) -> list[dict]:
+    """Return last N daily candles for a symbol (252 = ~1 trading year)."""
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT date, open, high, low, close, prev_close, ticks FROM candles_1d "
+            "WHERE symbol=? ORDER BY date DESC LIMIT ?",
+            (symbol.upper(), limit)
+        ).fetchall()
+        conn.close()
+        return [{"date": r[0], "open": r[1], "high": r[2], "low": r[3],
+                 "close": r[4], "prev_close": r[5], "ticks": r[6]} for r in reversed(rows)]
+    except Exception as e:
+        logger.debug(f"get_candles_1d error: {e}")
+        return []
+
+
+def get_db_stats() -> dict:
+    """Return row counts for monitoring."""
+    try:
+        conn = _get_conn()
+        return {
+            "prices":     conn.execute("SELECT COUNT(*) FROM prices").fetchone()[0],
+            "ticks":      conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0],
+            "candles_5m": conn.execute("SELECT COUNT(*) FROM candles_5m").fetchone()[0],
+            "candles_1d": conn.execute("SELECT COUNT(*) FROM candles_1d").fetchone()[0],
+        }
+    except Exception as e:
+        logger.debug(f"get_db_stats error: {e}")
+        return {}

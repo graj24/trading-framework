@@ -77,6 +77,7 @@ def run():
     logger.info("Price-feed daemon starting")
     session = _make_session()
     consecutive_errors = 0
+    poll_count = 0
 
     while True:
         try:
@@ -89,12 +90,19 @@ def run():
             updated = poll_once(session, symbols)
             market_open = pricing.is_market_open()
             interval = pricing.poll_interval_seconds()
+            poll_count += 1
 
-            logger.info(
-                f"Polled {updated}/{len(symbols)} symbols "
+            log_msg = (
+                f"Poll #{poll_count}: {updated}/{len(symbols)} symbols "
                 f"({'market open' if market_open else 'market closed'}) "
-                f"— next poll in {interval}s"
+                f"— next in {interval}s"
             )
+            # Log DB stats every 10 polls
+            if poll_count % 10 == 0:
+                stats = pricing.get_db_stats()
+                log_msg += f" | DB: {stats}"
+
+            logger.info(log_msg)
             consecutive_errors = 0
             time.sleep(interval)
 
@@ -102,7 +110,6 @@ def run():
             consecutive_errors += 1
             wait = min(60 * consecutive_errors, 300)
             logger.warning(f"Poll error (#{consecutive_errors}): {e} — retrying in {wait}s")
-            # Re-seed session on repeated errors (likely cookie expired)
             if consecutive_errors % 3 == 0:
                 logger.info("Re-seeding NSE session")
                 session = _make_session()

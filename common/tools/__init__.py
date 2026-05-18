@@ -267,6 +267,25 @@ def get_prices(pm_id: str, symbols: list) -> str:
     return "\n".join(results) if results else "No price data available"
 
 
+def get_candles(pm_id: str, symbol: str, timeframe: str = "1d", limit: int = 20) -> str:
+    """Get historical OHLC candles for a symbol from local DB. timeframe: '5m' or '1d'."""
+    import common.pricing as pricing
+    sym = symbol.upper()
+    if timeframe == "5m":
+        candles = pricing.get_candles_5m(sym, limit=min(limit, 78))
+    else:
+        candles = pricing.get_candles_1d(sym, limit=min(limit, 252))
+    if not candles:
+        return f"{sym}: no candle data yet (market data accumulates during trading hours)"
+    lines = [f"{sym} {timeframe} candles (last {len(candles)}):"]
+    for c in candles[-limit:]:
+        label = c.get("date") or str(int(c.get("ts", 0)))
+        lines.append(
+            f"  {label}  O:{c['open']:.2f}  H:{c['high']:.2f}  L:{c['low']:.2f}  C:{c['close']:.2f}"
+        )
+    return "\n".join(lines)
+
+
 def memory_store(pm_id: str, key: str, content: str) -> str:
     """Store a research finding in PM's persistent memory."""
     from common.memory import get_store
@@ -407,6 +426,22 @@ def get_tool_schemas() -> list[dict]:
         {
             "type": "function",
             "function": {
+                "name": "get_candles",
+                "description": "Get historical OHLC candles for a symbol from local DB. Use for technical analysis (RSI, moving averages, breakout levels). timeframe: '5m' (intraday) or '1d' (daily history).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string", "description": "NSE symbol (e.g. 'RELIANCE')"},
+                        "timeframe": {"type": "string", "enum": ["5m", "1d"], "description": "5m = intraday candles, 1d = daily candles"},
+                        "limit": {"type": "integer", "description": "Number of candles to return (default 20, max 78 for 5m, 252 for 1d)"},
+                    },
+                    "required": ["symbol"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "memory_store",
                 "description": "Store a research finding or insight in your persistent memory for future cycles.",
                 "parameters": {
@@ -449,6 +484,7 @@ def dispatch(pm_id: str, tool_name: str, args: dict) -> str:
         "web_search": web_search,
         "sql_query": sql_query,
         "get_prices": get_prices,
+        "get_candles": get_candles,
         "memory_store": memory_store,
         "memory_search": memory_search,
     }
