@@ -18,6 +18,7 @@ import yfinance as yf
 
 from agents.base import Agent, AgentResult
 from core.knowledge_base import read_kb, write_kb
+from core.sentiment_aggregation import aggregate as _agg_sentiment
 from ripple.sentiment_analyzer import SentimentAnalyzer
 
 _finbert = None
@@ -135,49 +136,47 @@ class NewsAgent(Agent):
     def analyze(self, symbol: str) -> dict:
         """Fetch, score, and store news for a symbol."""
         all_news = _fetch_yahoo_news(symbol)
-
-        # All Yahoo results are already symbol-specific — no filtering needed
         relevant = all_news
 
-        # Score each item — tier via keywords, sentiment via FinBERT
+        # Per-item FinBERT scoring
         headlines = [n["headline"] for n in relevant]
         finbert_score = _score_sentiment_finbert(headlines)
-
         for item in relevant:
             item["tier"] = _classify_tier(item["headline"])
-            # Per-item keyword sentiment kept for KB storage
             item["sentiment"] = _score_sentiment(item["headline"])
+        if finbert_score is not None and relevant:
+            for item in relevant:
+                item["sentiment"] = 0.6 * item["sentiment"] + 0.4 * finbert_score
 
-        # Use FinBERT aggregate if available, else keyword fallback
-        if finbert_score is not None:
-            avg_sentiment = finbert_score
-        else:
-            sentiments = [n["sentiment"] for n in relevant]
-            avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0.0
-
-        # Worst tier (lowest number = most urgent)
+        # Stage 3a: aggregation with dedup + source weighting + recency decay.
+        agg = _agg_sentiment(relevant)
         tiers = [n["tier"] for n in relevant if n.get("tier")]
         worst_tier = min(tiers) if tiers else None
 
-        # Persist to knowledge base (append, deduplicate by headline)
         existing = read_kb(symbol, "news_history.json")
         existing_headlines = {n["headline"] for n in existing.get("news", [])}
         new_items = [n for n in relevant if n["headline"] not in existing_headlines]
         all_stored = existing.get("news", []) + new_items
         write_kb(symbol, "news_history.json", {
-            "news": all_stored[-500:],  # keep last 500
+            "news": all_stored[-500:],
             "updated_at": datetime.now().isoformat(),
+            "last_aggregation": agg.to_dict(),
         })
 
-        top_headlines = [n["headline"] for n in relevant[:3]]
-        logger.info(f"NewsAgent {symbol}: {len(relevant)} items, sentiment={avg_sentiment:.2f}, tier={worst_tier}")
+        top_headlines = [n["headline"] for n in agg.items_used[:3]]
+        logger.info(f"NewsAgent {symbol}: {agg.n_raw} raw → {agg.n_unique} unique, "
+                    f"sentiment={agg.sentiment:.2f}, quality={agg.quality}, tier={worst_tier}")
 
         return {
-            "symbol": symbol,
-            "sentiment": round(avg_sentiment, 3),
-            "tier": worst_tier,
-            "news_count": len(relevant),
-            "headlines": top_headlines,
+            "symbol":       symbol,
+            "sentiment":    round(agg.sentiment, 3),
+            "tier":         worst_tier,
+            "news_count":   agg.n_unique,
+            "news_raw":     agg.n_raw,
+            "headlines":    top_headlines,
+            "quality":      agg.quality,
+            "avg_age_hours":     agg.avg_age_hours,
+            "avg_source_weight": agg.avg_source_weight,
         }
 
     def monitor_open_positions(self, symbols: list[str]) -> dict[str, Optional[int]]:

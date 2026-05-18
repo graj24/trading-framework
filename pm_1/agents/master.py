@@ -110,10 +110,12 @@ EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
         ]
 
         response = litellm.completion(
-            model=llm_cfg.get("model", "groq/llama-3.3-70b-versatile"),
+            model=llm_cfg.get("model", "openai/nvidia/Kimi-K2-Instruct"),
             messages=messages,
             temperature=llm_cfg.get("temperature", 0.1),
             max_tokens=200,
+            api_base=llm_cfg.get("api_base", "https://integrate.api.nvidia.com/v1"),
+            api_key=llm_cfg.get("api_key") or __import__("os").getenv("NVIDIA_NIM_API_KEY"),
         )
         raw = response.choices[0].message.content.strip()
         # Strip markdown code fences if present
@@ -335,6 +337,7 @@ class MasterAgent(Agent):
             "pattern_ev": pattern.get("expected_value", 0),
             "win_rate": pattern.get("win_rate", 50),
             "regime": regime.get("regime", "unknown"),
+            "regime_proba": regime.get("regime_proba", {}),
         }
 
         # ML signal (daily global model)
@@ -348,6 +351,21 @@ class MasterAgent(Agent):
             logger.debug(f"ML predict skipped: {e}")
             scores["ml_proba"]  = None
             scores["ml_signal"] = None
+
+        # Stage 4: learned_tech_score
+        try:
+            from models.learned_tech_score import predict_proba as lts_proba
+            _path = __import__("pathlib").Path("stocks") / symbol / "price_history.parquet"
+            if _path.exists():
+                import pandas as _pd
+                _df = _pd.read_parquet(_path).sort_index()
+                _df.index = _pd.to_datetime(_df.index, utc=True).tz_localize(None)
+                lts = lts_proba(_df)
+                if lts is not None:
+                    scores["technical_score"] = round(lts * 10, 2)
+                    scores["learned_tech_proba"] = round(lts, 4)
+        except Exception as e:
+            logger.debug(f"learned_tech_score skipped: {e}")
 
         # India intraday model (1h, NSE-specific)
         try:
@@ -389,7 +407,17 @@ class MasterAgent(Agent):
             scores["intraday_ml_signal"] = None
             scores["intraday_threshold"] = 0.55
 
-        # 4. Emergency override: TIER 1 news + FinBERT confirms negative sentiment
+        # Stage 5: per-PM stacked meta-learner
+        pm_id = str((context or {}).get("pm_id", "1"))
+        try:
+            from models.per_pm_meta import predict_proba as meta_predict
+            meta_p = meta_predict(pm_id, scores)
+            scores["meta_proba"] = round(meta_p, 4) if meta_p is not None else None
+        except Exception as e:
+            logger.debug(f"per_pm_meta skipped: {e}")
+            scores["meta_proba"] = None
+
+                # 4. Emergency override: TIER 1 news + FinBERT confirms negative sentiment
         if scores["tier"] == 1 and scores["sentiment"] < -0.2:
             logger.warning(f"{symbol}: TIER 1 news + negative sentiment — emergency skip")
             return self._result({
