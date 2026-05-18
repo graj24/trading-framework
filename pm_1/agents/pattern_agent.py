@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 WINDOW = 20
 LOOKAHEAD = 10
-TOP_K = 5
+TOP_K = 20  # Stage 2D: bumped from 5 for statistical reliability
 EXCLUDE_TAIL = 60
 
 

@@ -58,9 +58,10 @@ def _test_groq(key: str) -> tuple[bool, str]:
     try:
         import litellm
         r = litellm.completion(
-            model="groq/llama-3.3-70b-versatile",
+            model="openai/nvidia/Kimi-K2-Instruct",
             messages=[{"role": "user", "content": "Reply with the single word: OK"}],
             max_tokens=5,
+            api_base="https://integrate.api.nvidia.com/v1",
             api_key=key,
         )
         reply = r.choices[0].message.content.strip()

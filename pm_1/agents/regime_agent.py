@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from agents.base import Agent, AgentResult
+from core import features as F
 
 logger = logging.getLogger(__name__)
 
@@ -22,24 +23,8 @@ STRATEGY_ADJUSTMENTS = {
 
 
 def compute_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float:
-    """Compute ADX(14) and return the latest value."""
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    atr = tr.ewm(alpha=1 / period, min_periods=period).mean()
-    plus_di = 100 * (plus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr)
-
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    adx = dx.ewm(alpha=1 / period, min_periods=period).mean()
-    return float(adx.iloc[-1]) if not adx.empty else 0.0
+    """Wrapper around core.features.adx_value (Stage 0 canonical indicators)."""
+    return F.adx_value(high, low, close, period)
 
 
 class RegimeAgent(Agent):
@@ -105,6 +90,19 @@ class RegimeAgent(Agent):
 
             strategy_adjustments = STRATEGY_ADJUSTMENTS[regime]
 
+            # Stage 3b: probabilistic regime via GaussianMixture.
+            regime_proba: dict = {}
+            try:
+                from models.regime_model import predict_proba as _gmm_proba
+                proba = _gmm_proba(ret_20d=ret_20d, vol_20d=volatility,
+                                    vix=vix_val if vix_val else 16.0)
+                if proba is not None:
+                    regime_proba = proba
+                    regime = max(proba, key=proba.get)
+                    confidence = round(proba[regime], 3)
+            except Exception:
+                pass
+
             return self._result({
                 'regime': regime,
                 'confidence': round(confidence, 3),
@@ -113,6 +111,7 @@ class RegimeAgent(Agent):
                 'return_20d': round(ret_20d, 2),
                 'india_vix': round(vix_val, 2) if vix_val else None,
                 'strategy_adjustments': strategy_adjustments,
+                'regime_proba': regime_proba,
             })
         except Exception as e:
             logger.exception("RegimeAgent failed")

@@ -21,10 +21,13 @@ import sys
 import pickle
 import warnings
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+from core import features as F
 
 warnings.filterwarnings("ignore")
 
@@ -45,42 +48,8 @@ SECTOR_INDICES = {
 
 # ── Indicator helpers ─────────────────────────────────────────────────────────
 
-def _ema(s, n): return s.ewm(span=n, adjust=False).mean()
-
-def _rsi(s, n=14):
-    d = s.diff()
-    g = d.clip(lower=0).ewm(alpha=1/n, min_periods=n).mean()
-    l = (-d.clip(upper=0)).ewm(alpha=1/n, min_periods=n).mean()
-    return 100 - 100 / (1 + g / l.replace(0, np.nan))
-
-def _macd_hist(s):
-    m = _ema(s, 12) - _ema(s, 26)
-    return m - _ema(m, 9)
-
-def _atr(h, l, c, n=14):
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/n, min_periods=n).mean()
-
-def _stoch(h, l, c, k=14):
-    lo = l.rolling(k).min()
-    hi = h.rolling(k).max()
-    return (c - lo) / (hi - lo + 1e-9) * 100
-
-def _obv(c, v):
-    return (np.sign(c.diff()).fillna(0) * v).cumsum()
-
-def _bb_position(c, n=20):
-    sma = c.rolling(n).mean()
-    std = c.rolling(n).std()
-    return (c - (sma - 2*std)) / (4*std + 1e-9)   # 0=lower band, 1=upper band
-
-def _bb_width(c, n=20):
-    sma = c.rolling(n).mean()
-    std = c.rolling(n).std()
-    return (4 * std) / (sma + 1e-9)
-
-def _hist_vol(c, n):
-    return c.pct_change().rolling(n).std() * np.sqrt(252)
+# Indicators: see core/features.py. Use F.ema, F.rsi, F.macd_hist, F.atr,
+# F.stoch_k, F.obv, F.bb_position, F.bb_width, F.hist_vol.
 
 # ── Feature engineering ───────────────────────────────────────────────────────
 
@@ -94,36 +63,36 @@ def build_features(df: pd.DataFrame, market_data: dict[str, pd.Series]) -> pd.Da
     for n in [1, 3, 5, 10, 20]:
         feat[f"ret_{n}d"] = c.pct_change(n) * 100
 
-    feat["ema20_ratio"]  = c / _ema(c, 20) - 1
-    feat["ema50_ratio"]  = c / _ema(c, 50) - 1
-    feat["ema200_ratio"] = c / _ema(c, 200) - 1
-    feat["ema20_50_cross"] = (_ema(c, 20) / _ema(c, 50) - 1) * 100
+    feat["ema20_ratio"]  = c / F.ema(c, 20) - 1
+    feat["ema50_ratio"]  = c / F.ema(c, 50) - 1
+    feat["ema200_ratio"] = c / F.ema(c, 200) - 1
+    feat["ema20_50_cross"] = (F.ema(c, 20) / F.ema(c, 50) - 1) * 100
 
-    feat["bb_position"] = _bb_position(c)
-    feat["bb_width"]    = _bb_width(c)
+    feat["bb_position"] = F.bb_position(c)
+    feat["bb_width"]    = F.bb_width(c)
 
-    atr = _atr(h, l, c)
+    atr = F.atr(h, l, c)
     feat["atr_pct"]     = atr / c * 100
 
     # ── Momentum ──────────────────────────────────────────────────────────────
-    feat["rsi_7"]       = _rsi(c, 7)
-    feat["rsi_14"]      = _rsi(c, 14)
-    feat["rsi_21"]      = _rsi(c, 21)
-    feat["macd_hist"]   = _macd_hist(c)
-    feat["stoch_k"]     = _stoch(h, l, c)
+    feat["rsi_7"]       = F.rsi(c, 7)
+    feat["rsi_14"]      = F.rsi(c, 14)
+    feat["rsi_21"]      = F.rsi(c, 21)
+    feat["macd_hist"]   = F.macd_hist(c)
+    feat["stoch_k"]     = F.stoch_k(h, l, c)
     for n in [5, 10, 20]:
         feat[f"roc_{n}d"] = (c / c.shift(n) - 1) * 100
 
     # ── Volume ────────────────────────────────────────────────────────────────
     vol_avg20 = v.rolling(20).mean()
     feat["vol_ratio"]   = v / vol_avg20
-    obv = _obv(c, v)
+    obv = F.obv(c, v)
     feat["obv_trend"]   = (obv / obv.shift(5) - 1) * 100   # 5-day OBV change
     feat["vpt"]         = (c.pct_change() * v).cumsum() / 1e6  # volume-price trend
 
     # ── Volatility ────────────────────────────────────────────────────────────
     for n in [5, 10, 20]:
-        feat[f"hvol_{n}d"] = _hist_vol(c, n) * 100
+        feat[f"hvol_{n}d"] = F.hist_vol(c, n) * 100
 
     # ── Gap ───────────────────────────────────────────────────────────────────
     feat["gap_pct"]     = (df["Open"] / c.shift(1) - 1) * 100
@@ -229,8 +198,19 @@ def _incumbent_auc(X_val: "pd.DataFrame", y_val: "pd.Series") -> float:
 
 
 def _save_if_better(model, features: list, new_auc: float,
-                    X_val: "pd.DataFrame", y_val: "pd.Series") -> bool:
-    """Save model only when new_auc >= incumbent_auc + MIN_AUC_DELTA.
+                    X_val: "pd.DataFrame", y_val: "pd.Series",
+                    brier_uncal: Optional[float] = None,
+                    brier_cal: Optional[float] = None,
+                    walk_forward: "Optional['WalkForwardPnL']" = None,
+                    min_net_pnl_pct: float = 0.0) -> bool:
+    """Save model only when it passes:
+
+      * AUC ≥ AUC_FLOOR (rejects models barely better than coin flip)
+      * AUC ≥ incumbent_auc + MIN_AUC_DELTA (no regression in rank quality)
+      * Walk-forward net P&L on held-out slice ≥ min_net_pnl_pct (Stage 1C)
+
+    The walk-forward gate is the binding constraint for promotion. AUC stays
+    as a floor; money is the test.
 
     Returns True if the model was promoted, False if it was rejected.
     """
@@ -242,21 +222,61 @@ def _save_if_better(model, features: list, new_auc: float,
     if new_auc < inc_auc + MIN_AUC_DELTA:
         print(f"\n⚠️  Promotion REJECTED: new AUC {new_auc:.4f} < incumbent {inc_auc:.4f} + delta {MIN_AUC_DELTA}")
         return False
+    if walk_forward is not None:
+        ok, reason = walk_forward.passes(min_net_pnl_pct=min_net_pnl_pct)
+        if not ok:
+            print(f"\n⚠️  Promotion REJECTED: walk-forward P&L gate failed — {reason}")
+            print(f"   ({walk_forward.n_trades} trades, mean={walk_forward.mean_pnl_pct:+.3f}%, "
+                  f"win_rate={walk_forward.win_rate_pct:.1f}%)")
+            return False
     MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     if MODEL_PATH.exists():
         MODEL_PATH.rename(MODEL_PATH.with_suffix(".prev.pkl"))
+    payload = {"model": model, "features": features, "auc": new_auc}
+    if brier_uncal is not None: payload["brier_uncal"] = brier_uncal
+    if brier_cal is not None:   payload["brier_cal"]   = brier_cal
+    if walk_forward is not None:
+        payload["walk_forward"] = {
+            "n_trades":     walk_forward.n_trades,
+            "net_pnl_pct":  walk_forward.net_pnl_pct,
+            "mean_pnl_pct": walk_forward.mean_pnl_pct,
+            "win_rate_pct": walk_forward.win_rate_pct,
+        }
     with open(MODEL_PATH, "wb") as f:
-        pickle.dump({"model": model, "features": features, "auc": new_auc}, f)
+        pickle.dump(payload, f)
     print(f"\n✅ Model promoted: new AUC {new_auc:.4f} >= incumbent {inc_auc:.4f} + delta {MIN_AUC_DELTA}")
+    if brier_cal is not None and brier_uncal is not None:
+        print(f"   Brier: uncal={brier_uncal:.4f} → cal={brier_cal:.4f}")
+    if walk_forward is not None:
+        print(f"   Walk-forward: {walk_forward.n_trades} trades, "
+              f"net P&L {walk_forward.net_pnl_pct:+.2f}%, "
+              f"mean {walk_forward.mean_pnl_pct:+.3f}%, "
+              f"win rate {walk_forward.win_rate_pct:.1f}%")
     return True
 
 
 # ── Train ─────────────────────────────────────────────────────────────────────
 
 def train():
+    """Train the daily ML model with isotonic probability calibration.
+
+    Stage 1A: probabilities are calibrated so that `proba=0.62` actually
+    corresponds to ~62% empirical hit rate on similar past cases. The
+    saved model is a `CalibratedClassifierCV` whose underlying base
+    estimator is the same GradientBoostingClassifier we trained before.
+    Predict-time interface is unchanged (`predict_proba`).
+
+    Reports per fold:
+      - AUC (uncalibrated baseline — calibration cannot improve AUC)
+      - Brier score uncalibrated  (lower is better, range [0, 1])
+      - Brier score calibrated    (should be lower than uncalibrated)
+    """
     from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.calibration import CalibratedClassifierCV
     from sklearn.model_selection import TimeSeriesSplit
-    from sklearn.metrics import classification_report, roc_auc_score
+    from sklearn.metrics import (
+        classification_report, roc_auc_score, brier_score_loss
+    )
 
     import yaml
     with open("config.yaml") as f:
@@ -267,7 +287,7 @@ def train():
     watchlist = [p.parent.name for p in all_parquets]
     print(f"Building dataset for {len(watchlist)} stocks...")
 
-    all_X, all_y = [], []
+    all_X, all_y, all_fwd = [], [], []
 
     # Load market data once
     market_data = load_market_data("2021-01-01", "2026-12-31")
@@ -285,64 +305,114 @@ def train():
 
         feat = build_features(df, market_data)
         labels = build_labels(df)
+        fwd_pct = (df["Close"].shift(-FORWARD_DAYS) / df["Close"] - 1) * 100
 
-        # Align and drop NaN
-        combined = feat.join(labels.rename("label")).dropna()
-        combined = combined.iloc[:-FORWARD_DAYS]  # remove last rows (no label yet)
+        combined = (feat
+                    .join(labels.rename("label"))
+                    .join(fwd_pct.rename("fwd_pct"))
+                    .dropna())
+        combined = combined.iloc[:-FORWARD_DAYS]
 
-        all_X.append(combined.drop("label", axis=1))
+        all_X.append(combined.drop(["label", "fwd_pct"], axis=1))
         all_y.append(combined["label"])
+        all_fwd.append(combined["fwd_pct"])
         print(f"  {symbol}: {len(combined)} samples, {combined['label'].mean()*100:.1f}% positive")
 
     X = pd.concat(all_X).reset_index(drop=True)
     y = pd.concat(all_y).reset_index(drop=True)
+    fwd_returns = pd.concat(all_fwd).reset_index(drop=True)
 
     print(f"\nTotal dataset: {len(X)} samples, {len(X.columns)} features")
     print(f"Class balance: {y.mean()*100:.1f}% BUY signals")
 
-    model = GradientBoostingClassifier(
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.8,
-        max_features=0.8,
-        random_state=42,
+    base_params = dict(
+        n_estimators=300, max_depth=4, learning_rate=0.05,
+        subsample=0.8, max_features=0.8, random_state=42,
     )
 
-    # Time-series cross-validation
     tscv = TimeSeriesSplit(n_splits=5)
     auc_scores = []
+    brier_uncal_scores = []
+    brier_cal_scores = []
 
     print("\nCross-validation (TimeSeriesSplit, 5 folds):")
-    for fold, (train_idx, val_idx) in enumerate(tscv.split(X)):
-        X_tr, X_val = X.iloc[train_idx].fillna(0), X.iloc[val_idx].fillna(0)
-        y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
-        model.fit(X_tr, y_tr)
-        proba = model.predict_proba(X_val)[:, 1]
-        auc = roc_auc_score(y_val, proba)
+    for fold, (tr_idx, vl_idx) in enumerate(tscv.split(X)):
+        X_tr, X_vl = X.iloc[tr_idx].fillna(0), X.iloc[vl_idx].fillna(0)
+        y_tr, y_vl = y.iloc[tr_idx], y.iloc[vl_idx]
+
+        # Uncalibrated baseline (AUC + Brier reference)
+        base_fold = GradientBoostingClassifier(**base_params)
+        base_fold.fit(X_tr, y_tr)
+        p_unc = base_fold.predict_proba(X_vl)[:, 1]
+
+        # Calibrated: split train into 80% fit / 20% calibrate (preserves time order)
+        split = max(100, int(len(tr_idx) * 0.8))
+        if split < len(tr_idx) - 50:
+            fit_idx, cal_idx = tr_idx[:split], tr_idx[split:]
+            base_for_cal = GradientBoostingClassifier(**base_params)
+            base_for_cal.fit(X.iloc[fit_idx].fillna(0), y.iloc[fit_idx])
+            cal = CalibratedClassifierCV(estimator=base_for_cal, method="isotonic", cv="prefit")
+            cal.fit(X.iloc[cal_idx].fillna(0), y.iloc[cal_idx])
+            p_cal = cal.predict_proba(X_vl)[:, 1]
+        else:
+            p_cal = p_unc  # fold too small to split
+
+        auc = roc_auc_score(y_vl, p_unc)
+        brier_u = brier_score_loss(y_vl, p_unc)
+        brier_c = brier_score_loss(y_vl, p_cal)
         auc_scores.append(auc)
-        print(f"  Fold {fold+1}: AUC = {auc:.4f}")
+        brier_uncal_scores.append(brier_u)
+        brier_cal_scores.append(brier_c)
+        print(f"  Fold {fold+1}: AUC={auc:.4f} | Brier uncal={brier_u:.4f} cal={brier_c:.4f}")
 
-    print(f"\nMean AUC: {np.mean(auc_scores):.4f} ± {np.std(auc_scores):.4f}")
+    mean_auc = float(np.mean(auc_scores))
+    mean_brier_u = float(np.mean(brier_uncal_scores))
+    mean_brier_c = float(np.mean(brier_cal_scores))
+    delta = (mean_brier_u - mean_brier_c) / mean_brier_u * 100 if mean_brier_u else 0.0
 
-    # Final fit on all data
-    model.fit(X.fillna(0), y)
+    print(f"\nMean AUC:         {mean_auc:.4f} ± {np.std(auc_scores):.4f}")
+    print(f"Mean Brier uncal: {mean_brier_u:.4f}")
+    print(f"Mean Brier cal:   {mean_brier_c:.4f}  ({delta:+.1f}% improvement)")
 
-    # Feature importance
-    importance = pd.Series(model.feature_importances_, index=X.columns)
+    # Final model: fit base on first 80% of all data, calibrate on last 20%.
+    # Saved model is the calibrator; predict_proba goes through it.
+    n_total = len(X)
+    n_calib = max(200, n_total // 5)
+    fit_X = X.iloc[:-n_calib].fillna(0); fit_y = y.iloc[:-n_calib]
+    cal_X = X.iloc[-n_calib:].fillna(0); cal_y = y.iloc[-n_calib:]
+
+    base_final = GradientBoostingClassifier(**base_params)
+    base_final.fit(fit_X, fit_y)
+    final_model = CalibratedClassifierCV(estimator=base_final, method="isotonic", cv="prefit")
+    final_model.fit(cal_X, cal_y)
+
+    # Feature importance from base estimator (calibrator doesn't expose it).
+    importance = pd.Series(base_final.feature_importances_, index=X.columns)
     top20 = importance.nlargest(20)
     print(f"\nTop 20 features:")
     for feat_name, imp in top20.items():
         bar = "█" * int(imp * 300)
         print(f"  {feat_name:<25} {imp:.4f} {bar}")
 
-    # Promotion gate: only overwrite model.pkl if new AUC is not worse.
-    mean_auc = float(np.mean(auc_scores))
-    # Use the last validation fold for the incumbent comparison.
-    _save_if_better(model, list(X.columns), mean_auc, X_val.fillna(0), y_val)
+    # Stage 1C: walk-forward net-P&L gate. Simulate the candidate's trades on
+    # the calibration slice using realistic round-trip costs from core.costs.
+    from core.promotion_gate import walk_forward_pnl
+    cal_proba = final_model.predict_proba(cal_X)[:, 1]
+    cal_fwd   = fwd_returns.iloc[-n_calib:].values
+    wf = walk_forward_pnl(cal_proba, cal_fwd, threshold=0.55)
+    print(f"\nWalk-forward (calibration slice, last {n_calib} rows):")
+    print(f"  trades={wf.n_trades}/{wf.n_eval}  "
+          f"net P&L={wf.net_pnl_pct:+.2f}%  "
+          f"mean={wf.mean_pnl_pct:+.3f}%  "
+          f"win rate={wf.win_rate_pct:.1f}%  "
+          f"(cost {wf.cost_per_trade_pct:.3f}%/trade)")
 
-    print(f"\nClassification report (last fold):")
-    print(classification_report(y_val, model.predict(X_val.fillna(0))))
+    _save_if_better(final_model, list(X.columns), mean_auc, X_vl.fillna(0), y_vl,
+                    brier_uncal=mean_brier_u, brier_cal=mean_brier_c,
+                    walk_forward=wf)
+
+    print(f"\nClassification report (last fold, calibrated):")
+    print(classification_report(y_vl, (final_model.predict_proba(X_vl)[:, 1] >= 0.5).astype(int)))
 
 
 # ── Predict ───────────────────────────────────────────────────────────────────

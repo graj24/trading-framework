@@ -8,67 +8,26 @@ import numpy as np
 import pandas as pd
 
 from agents.base import Agent, AgentResult
+from core import features as F
 
 logger = logging.getLogger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 
-def _ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
 
 
-def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
 
 
-def _macd(close: pd.Series):
-    macd_line = _ema(close, 12) - _ema(close, 26)
-    signal_line = _ema(macd_line, 9)
-    return macd_line, signal_line
 
 
-def _bollinger(close: pd.Series, period: int = 20, std_dev: int = 2):
-    sma = close.rolling(period).mean()
-    std = close.rolling(period).std()
-    return sma + std_dev * std, sma, sma - std_dev * std
 
 
-def _atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low - close.shift()).abs()
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / period, min_periods=period).mean()
 
 
-def _adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    plus_dm = high.diff().clip(lower=0)
-    minus_dm = (-low.diff()).clip(lower=0)
-    # Zero out where the other is larger
-    plus_dm[plus_dm < minus_dm] = 0
-    minus_dm[minus_dm < plus_dm] = 0
-    atr = _atr(high, low, close, period)
-    plus_di = 100 * (plus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr)
-    minus_di = 100 * (minus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-    return dx.ewm(alpha=1 / period, min_periods=period).mean()
 
 
-def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
-    sign = np.sign(close.diff()).fillna(0)
-    return (sign * volume).cumsum()
 
 
-def _vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> float:
-    typical = (high + low + close) / 3
-    return (typical * volume).sum() / volume.sum()
 
 
 def _find_support_resistance(df: pd.DataFrame, window: int = 5, min_touches: int = 3):
@@ -119,27 +78,27 @@ class TechnicalAgent(Agent):
         price = close.iloc[-1]
 
         # Trend
-        ema20 = _ema(close, 20).iloc[-1]
-        ema50 = _ema(close, 50).iloc[-1]
-        ema200 = _ema(close, 200).iloc[-1]
+        ema20 = F.ema(close, 20).iloc[-1]
+        ema50 = F.ema(close, 50).iloc[-1]
+        ema200 = F.ema(close, 200).iloc[-1]
 
         # Momentum
-        rsi = _rsi(close).iloc[-1]
-        macd_line, signal_line = _macd(close)
+        rsi = F.rsi(close).iloc[-1]
+        macd_line, signal_line, _macd_h = F.macd(close)
         macd_val = macd_line.iloc[-1]
         signal_val = signal_line.iloc[-1]
 
         # Volatility
-        bb_upper, bb_mid, bb_lower = _bollinger(close)
-        atr = _atr(high, low, close).iloc[-1]
+        bb_upper, bb_mid, bb_lower = F.bollinger(close)
+        atr = F.atr(high, low, close).iloc[-1]
 
         # Volume
-        obv = _obv(close, volume)
+        obv = F.obv(close, volume)
         obv_rising = obv.iloc[-1] > obv.iloc[-6]  # last 5 days
-        vwap = _vwap(high.tail(20), low.tail(20), close.tail(20), volume.tail(20))
+        vwap = F.vwap(high.tail(20), low.tail(20), close.tail(20), volume.tail(20))
 
         # ADX
-        adx = _adx(high, low, close).iloc[-1]
+        adx = F.adx(high, low, close).iloc[-1]
 
         # Composite score
         score = 0
@@ -218,10 +177,10 @@ class TechnicalAgent(Agent):
             df5 = yf.Ticker(symbol + ".NS").history(period="2d", interval="5m")
             if not df5.empty and len(df5) >= 20:
                 c5 = df5["Close"]
-                rsi5 = float(_rsi(c5).iloc[-1])
-                macd5, sig5 = _macd(c5)
+                rsi5 = float(F.rsi(c5).iloc[-1])
+                macd5, sig5, _h5 = F.macd(c5)
                 intraday_signal = "bullish" if float(macd5.iloc[-1]) > float(sig5.iloc[-1]) else "bearish"
-                vwap5 = _vwap(df5["High"].tail(20), df5["Low"].tail(20), c5.tail(20), df5["Volume"].tail(20))
+                vwap5 = F.vwap(df5["High"].tail(20), df5["Low"].tail(20), c5.tail(20), df5["Volume"].tail(20))
                 intraday_score = sum([
                     rsi5 > 50,
                     intraday_signal == "bullish",

@@ -6,7 +6,8 @@ data:
   - 15m
   - 5m
 llm:
-  model: groq/llama-3.3-70b-versatile
+  model: openai/nvidia/Kimi-K2-Instruct
+  api_base: https://integrate.api.nvidia.com/v1
   max_tokens: 2000
   temperature: 0.1
 logging:
