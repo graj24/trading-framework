@@ -30,6 +30,7 @@ RETRYABLE_MARKERS = ("429", "500", "502", "503", "504", "rate limit", "timeout")
 DEFAULT_FALLBACK_MODEL = "groq/llama-3.3-70b-versatile"
 API_KEY_ENV_VARS = (
     "LLM_API_KEY",
+    "AGENTROUTER_API_KEY",
     "GROQ_API_KEY",
     "OPENAI_API_KEY",
     "NVIDIA_NIM_API_KEY",

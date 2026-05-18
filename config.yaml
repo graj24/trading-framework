@@ -6,8 +6,13 @@ data:
   - 15m
   - 5m
 llm:
-  model: openai/nvidia/Kimi-K2-Instruct
-  api_base: https://integrate.api.nvidia.com/v1
+  # Provider: AgentRouter (OpenAI-compatible Chat Completions endpoint)
+  # API key resolved from AGENTROUTER_API_KEY env var (see common/llm/__init__.py)
+  # Available models on AgentRouter (verify exact names at agentrouter.org/console):
+  #   deepseek-v4-pro, deepseek-v4-flash, claude-sonnet-4-5-20250929,
+  #   claude-haiku-4-5-20251001, gpt-5
+  model: openai/deepseek-v4-pro
+  api_base: https://agentrouter.org/v1
   max_tokens: 2000
   temperature: 0.1
 logging:
