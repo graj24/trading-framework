@@ -162,7 +162,9 @@ def load_market_data(start: str, end: str) -> dict[str, pd.Series]:
         try:
             df = pd.read_parquet(p)
             df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
-            return df["Close"].sort_index()
+            s = df["Close"].sort_index()
+            s = s[~s.index.duplicated(keep="last")]
+            return s
         except Exception:
             return None
 
