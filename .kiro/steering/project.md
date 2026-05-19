@@ -7,9 +7,9 @@ An autonomous multi-PM trading framework for the Indian equity market (NSE). Mul
 
 | | |
 |---|---|
-| Trading EC2 | 13.206.3.62 (m7i-flex.large, 8GB) — trading daemon + FastAPI + PM agents |
+| Trading EC2 | YOUR_EC2_IP (m7i-flex.large, 8GB) — trading daemon + FastAPI + PM agents |
 | Multica EC2 | 13.232.42.85 (t3.small) — Multica agent management platform |
-| Trading UI | http://13.206.3.62 |
+| Trading UI | http://YOUR_EC2_IP |
 | Multica board | http://13.232.42.85:3000 |
 | SSH key | ~/.ssh/trading-key.pem |
 | Repo | https://github.com/graj24/trading-framework |

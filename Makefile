@@ -1,4 +1,5 @@
-EC2_IP   = 13.206.3.62
+# Set EC2_IP in your environment or pass it directly: make deploy EC2_IP=1.2.3.4
+EC2_IP   ?= $(shell echo $${EC2_IP:-YOUR_EC2_IP})
 EC2_USER = ec2-user
 PEM      = ~/.ssh/trading-key.pem
 SSH      = ssh -i $(PEM) $(EC2_USER)@$(EC2_IP)

@@ -9,7 +9,7 @@ You (CEO)
 Multica Board  http://13.232.42.85:3000
     │  assign tasks to PM agents
     ▼
-Trading EC2 (13.206.3.62)  ← Multica daemon runs here
+Trading EC2 (YOUR_EC2_IP)  ← Multica daemon runs here
     ├── PM1 agent  (kiro-cli, executes in /app)
     ├── PM2 agent  (kiro-cli, executes in /app)
     ├── trading-daemon   → python main.py --schedule (24/7)
@@ -28,13 +28,13 @@ Multica EC2 (13.232.42.85)
 
 | Instance | IP | Type | Purpose |
 |---|---|---|---|
-| trading-framework | 13.206.3.62 | m7i-flex.large (8GB) | Trading daemon + API + PM agents |
+| trading-framework | YOUR_EC2_IP | m7i-flex.large (8GB) | Trading daemon + API + PM agents |
 | multica-server | 13.232.42.85 | t3.small (2GB) | Multica management platform |
 
 SSH key for both: `~/.ssh/trading-key.pem`
 
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62   # trading EC2
+ssh -i ~/.ssh/trading-key.pem ec2-user@YOUR_EC2_IP   # trading EC2
 ssh -i ~/.ssh/trading-key.pem ec2-user@13.232.42.85  # multica EC2
 ```
 
@@ -44,8 +44,8 @@ ssh -i ~/.ssh/trading-key.pem ec2-user@13.232.42.85  # multica EC2
 
 | Service | URL |
 |---|---|
-| Trading dashboard (React UI) | http://13.206.3.62 |
-| API docs (Swagger) | http://13.206.3.62/docs |
+| Trading dashboard (React UI) | http://YOUR_EC2_IP |
+| API docs (Swagger) | http://YOUR_EC2_IP/docs |
 | Multica board | http://13.232.42.85:3000 |
 | Multica API | http://13.232.42.85:8080 |
 
@@ -96,7 +96,7 @@ make status
 ### View live logs
 ```bash
 make logs                                          # trading daemon
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62 "tail -f /app/logs/api.log"
+ssh -i ~/.ssh/trading-key.pem ec2-user@YOUR_EC2_IP "tail -f /app/logs/api.log"
 ```
 
 ### Restart services
@@ -164,7 +164,7 @@ Covered by AWS credits. Monitor at https://console.aws.amazon.com/billing/home#/
 ## AWS resource IDs
 
 ```
-Trading EC2:   i-0ff6ea4482b95d3f6  (13.206.3.62)
+Trading EC2:   i-0ff6ea4482b95d3f6  (YOUR_EC2_IP)
 Multica EC2:   i-011ce82a396c7bbe0  (13.232.42.85)
 Trading EIP:   eipalloc-0adf311090a7cf7e4
 Multica EIP:   eipalloc-055baded4671a7c80

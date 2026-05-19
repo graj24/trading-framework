@@ -1,6 +1,6 @@
 # EC2 Access for Collaborators
 
-EC2 host: `13.206.3.62`  
+EC2 host: `YOUR_EC2_IP`  
 User: `ec2-user`
 
 ---
@@ -21,24 +21,24 @@ Press Enter to accept the default path (`~/.ssh/id_ed25519`). Set a passphrase o
 cat ~/.ssh/id_ed25519.pub
 ```
 
-Send the output (one line starting with `ssh-ed25519 AAAA...`) to the repo owner (Gaurav). Do not send the private key (`id_ed25519`).
+Send the output (one line starting with `ssh-ed25519 AAAA...`) to the repo owner. Do not send the private key (`id_ed25519`).
 
 **Step 3 — Once Gaurav confirms he's added it, connect**
 
 ```bash
-ssh ec2-user@13.206.3.62
+ssh ec2-user@YOUR_EC2_IP
 ```
 
 No PEM file needed. SSH uses your private key automatically.
 
 ---
 
-## For Gaurav (repo owner) — adding a collaborator
+## For the repo owner — adding a collaborator
 
 **Step 1 — SSH into EC2**
 
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+ssh -i ~/.ssh/trading-key.pem ec2-user@YOUR_EC2_IP
 ```
 
 **Step 2 — Add their public key**
@@ -66,7 +66,7 @@ You should see their key at the bottom.
 To remove a collaborator's access:
 
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+ssh -i ~/.ssh/trading-key.pem ec2-user@YOUR_EC2_IP
 nano ~/.ssh/authorized_keys
 # Delete the line with their key, save and exit
 ```

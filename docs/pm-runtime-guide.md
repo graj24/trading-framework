@@ -313,9 +313,9 @@ workspace is still provisioned.
 # UI: click the ⏸ Pause PM button in the right drawer of /pms
 
 # CLI:
-curl -X POST 'http://13.206.3.62/api/pms/1/pause?reason=manual%20review'
-curl -X POST 'http://13.206.3.62/api/pms/1/resume'
-curl 'http://13.206.3.62/api/pms/1/paused'
+curl -X POST 'http://YOUR_EC2_IP/api/pms/1/pause?reason=manual%20review'
+curl -X POST 'http://YOUR_EC2_IP/api/pms/1/resume'
+curl 'http://YOUR_EC2_IP/api/pms/1/paused'
 ```
 
 Pausing writes `pm_<id>/state/PAUSED`. While present:
@@ -328,9 +328,9 @@ Pausing writes `pm_<id>/state/PAUSED`. While present:
 ```bash
 # UI: red button in /pms top bar
 # CLI:
-curl 'http://13.206.3.62/api/pms/kill_switch'
-curl -X POST 'http://13.206.3.62/api/pms/kill_switch/activate'
-curl -X POST 'http://13.206.3.62/api/pms/kill_switch/deactivate'
+curl 'http://YOUR_EC2_IP/api/pms/kill_switch'
+curl -X POST 'http://YOUR_EC2_IP/api/pms/kill_switch/activate'
+curl -X POST 'http://YOUR_EC2_IP/api/pms/kill_switch/deactivate'
 ```
 
 When active, the file `KILL_SWITCH` exists at the repo root and *every* broker call

@@ -9,7 +9,7 @@ set -e
 KEY="${1:?Usage: update_env.sh <KEY> <VALUE> [path-to-pem]}"
 VALUE="${2:?Usage: update_env.sh <KEY> <VALUE> [path-to-pem]}"
 PEM="${3:-~/.ssh/trading-key.pem}"
-HOST="ec2-user@13.206.3.62"
+HOST="ec2-user@${EC2_IP:?Set EC2_IP environment variable}"
 
 echo "==> Updating ${KEY} on ${HOST}..."
 
