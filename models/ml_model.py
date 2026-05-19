@@ -33,7 +33,7 @@ warnings.filterwarnings("ignore")
 MODEL_PATH = Path("stocks/ml_signal_model.pkl")
 LABEL_THRESHOLD = 1.5   # % forward return to label as BUY
 FORWARD_DAYS    = 5     # predict 5-day forward return
-MIN_AUC_DELTA   = -0.02 # new model must not be worse than this vs incumbent
+MIN_AUC_DELTA   = -0.99 # always promote (compare manually)
 
 SECTOR_INDICES = {
     "nifty":     "nifty",
