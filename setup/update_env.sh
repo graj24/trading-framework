@@ -3,13 +3,13 @@
 # Usage: bash setup/update_env.sh <KEY> <VALUE> [path-to-pem]
 #
 # Example:
-#   bash setup/update_env.sh GROQ_API_KEY gsk_abc123 ~/.ssh/trading-key.pem
+#   bash setup/update_env.sh GROQ_API_KEY gsk_abc123 ~/.ssh/<your-key>.pem
 set -e
 
 KEY="${1:?Usage: update_env.sh <KEY> <VALUE> [path-to-pem]}"
 VALUE="${2:?Usage: update_env.sh <KEY> <VALUE> [path-to-pem]}"
-PEM="${3:-~/.ssh/trading-key.pem}"
-HOST="ec2-user@13.206.3.62"
+PEM="${3:-~/.ssh/<your-key>.pem}"
+HOST="ec2-user@<TRADING_EC2_IP>"
 
 echo "==> Updating ${KEY} on ${HOST}..."
 

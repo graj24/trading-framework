@@ -6,22 +6,22 @@ Multica is the management layer for PM agents. You (CEO) assign tasks from the M
 
 | | |
 |---|---|
-| Board UI | http://13.232.42.85:3000 |
-| Backend API | http://13.232.42.85:8080 |
-| SSH | `ssh -i ~/.ssh/trading-key.pem ec2-user@13.232.42.85` |
+| Board UI | http://<MULTICA_EC2_IP>:3000 |
+| Backend API | http://<MULTICA_EC2_IP>:8080 |
+| SSH | `ssh -i ~/.ssh/<your-key>.pem ec2-user@<MULTICA_EC2_IP>` |
 
 ---
 
 ## Architecture
 
 ```
-Multica EC2 (13.232.42.85)
+Multica EC2 (<MULTICA_EC2_IP>)
 ├── multica-frontend   port 3000  (Next.js board UI)
 ├── multica-backend    port 8080  (Go API + WebSocket)
 └── multica-postgres   port 5432  (PostgreSQL + pgvector)
 
-Trading EC2 (13.206.3.62)
-└── multica daemon  ←→  connects to 13.232.42.85:8080
+Trading EC2 (<TRADING_EC2_IP>)
+└── multica daemon  ←→  connects to <MULTICA_EC2_IP>:8080
     ├── kiro-cli  (primary agent executor)
     └── claude    (fallback)
 ```
@@ -40,7 +40,7 @@ Trading EC2 (13.206.3.62)
 ## As CEO — day-to-day
 
 **Assign a task to a PM:**
-1. Go to http://13.232.42.85:3000
+1. Go to http://<MULTICA_EC2_IP>:3000
 2. Create an issue (describe what you want the PM to do)
 3. Assign it to PM1 or PM2
 4. The agent picks it up, executes on the trading EC2 in `/app`, and reports back
@@ -53,7 +53,7 @@ Trading EC2 (13.206.3.62)
 
 **Check P&L scoreboard:**
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+ssh -i ~/.ssh/<your-key>.pem ec2-user@<TRADING_EC2_IP>
 sqlite3 /app/paper_trades.db "
 SELECT pm_id, COUNT(*) trades, SUM(pnl_inr) total_pnl,
        ROUND(100.0 * SUM(CASE WHEN pnl_inr > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) win_rate
@@ -89,7 +89,7 @@ git add pm_prompts/ && git commit -m "feat: add PM3 prompt" && git push
 The daemon connects the trading EC2 to the Multica server and listens for tasks.
 
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+ssh -i ~/.ssh/<your-key>.pem ec2-user@<TRADING_EC2_IP>
 
 multica daemon status   # check if running
 multica daemon start    # start
@@ -105,8 +105,8 @@ multica daemon start
 **If daemon loses connection to Multica server:**
 ```bash
 multica daemon stop
-multica setup self-host --server-url http://13.232.42.85:8080
-# frontend URL: http://13.232.42.85:3000
+multica setup self-host --server-url http://<MULTICA_EC2_IP>:8080
+# frontend URL: http://<MULTICA_EC2_IP>:3000
 # login with mul_ token from Settings → Access Tokens
 multica daemon start
 ```
@@ -135,7 +135,7 @@ systemctl --user start multica-daemon
 ## Multica server operations (on Multica EC2)
 
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.232.42.85
+ssh -i ~/.ssh/<your-key>.pem ec2-user@<MULTICA_EC2_IP>
 
 # Check all containers
 docker ps
@@ -164,7 +164,7 @@ The verification code prints to the backend log when email is not configured.
 Kiro is the agent executor. It needs to stay authenticated.
 
 ```bash
-ssh -i ~/.ssh/trading-key.pem ec2-user@13.206.3.62
+ssh -i ~/.ssh/<your-key>.pem ec2-user@<TRADING_EC2_IP>
 
 kiro-cli whoami          # check auth status
 kiro-cli login           # re-authenticate (opens browser URL)

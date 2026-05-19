@@ -3,11 +3,11 @@
 # Usage: bash setup/deploy.sh <elastic-ip> [path-to-pem]
 #
 # Example:
-#   bash setup/deploy.sh 13.233.45.67 ~/.ssh/trading-key.pem
+#   bash setup/deploy.sh 13.233.45.67 ~/.ssh/<your-key>.pem
 set -e
 
 EC2_IP="${1:?Usage: deploy.sh <elastic-ip> [path-to-pem]}"
-PEM="${2:-~/.ssh/trading-key.pem}"
+PEM="${2:-~/.ssh/<your-key>.pem}"
 REMOTE="ec2-user@${EC2_IP}"
 
 echo "==> Syncing code to ${REMOTE}:/app ..."

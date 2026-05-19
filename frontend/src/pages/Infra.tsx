@@ -118,11 +118,11 @@ export function Infra() {
           <CardHeader title="Multica Platform" />
           <div className="p-3 flex flex-col gap-0">
             <Row label="Board" value={
-              <a href="http://13.232.42.85:3000" target="_blank" rel="noreferrer" className="text-accent-primary hover:underline flex items-center gap-1">
-                13.232.42.85:3000 <ExternalLink size={10} />
+              <a href={`http://${import.meta.env.VITE_MULTICA_IP || "<MULTICA_IP>"}:3000`} target="_blank" rel="noreferrer" className="text-accent-primary hover:underline flex items-center gap-1">
+                {(import.meta.env.VITE_MULTICA_IP || "<MULTICA_IP>") + ":3000"} <ExternalLink size={10} />
               </a>
             } />
-            <Row label="Backend" value="13.232.42.85:8080" />
+            <Row label="Backend" value={(import.meta.env.VITE_MULTICA_IP || "<MULTICA_IP>") + ":8080"} />
             <Row label="Daemon" value={<StatusBadge status={data.multica.status} />} />
             <Row label="Agents" value={data.multica.agents || "—"} />
             <Row label="Workspaces" value={data.multica.workspaces || "—"} />
@@ -148,9 +148,9 @@ export function Infra() {
         <Card>
           <CardHeader title="Multica EC2" />
           <div className="p-3 flex flex-col gap-0">
-            <Row label="Instance ID" value="i-011ce82a396c7bbe0" />
+            <Row label="Instance ID" value={import.meta.env.VITE_MULTICA_INSTANCE_ID || "<configure VITE_MULTICA_INSTANCE_ID>"} />
             <Row label="Type" value="t3.small" />
-            <Row label="Public IP" value="13.232.42.85" />
+            <Row label="Public IP" value={import.meta.env.VITE_MULTICA_IP || "<configure VITE_MULTICA_IP>"} />
             <Row label="Region" value="ap-south-1" />
             <Row label="Services" value="frontend · backend · postgres" />
           </div>

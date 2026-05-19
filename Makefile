@@ -1,6 +1,6 @@
-EC2_IP   = 13.206.3.62
-EC2_USER = ec2-user
-PEM      = ~/.ssh/trading-key.pem
+EC2_IP   ?= $(shell cat setup/.aws_instance_info 2>/dev/null | grep '^trading_ip=' | cut -d= -f2)
+EC2_USER ?= ec2-user
+PEM      ?= ~/.ssh/<your-key>.pem
 SSH      = ssh -i $(PEM) $(EC2_USER)@$(EC2_IP)
 
 # ── Local ─────────────────────────────────────────────────────────────────────

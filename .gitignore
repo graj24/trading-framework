@@ -54,3 +54,5 @@ models/intraday_detector_stats.json
 
 # Local session context (not for repo)
 CONTEXT.md
+# Private infra docs (collaborator SSH instructions, real IPs)
+setup/private/
