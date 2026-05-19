@@ -76,14 +76,16 @@ MARKET REGIME: {scores.get('regime', 'unknown')}
 CORRELATIONS: {dict(top_corr)}
 EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
 
-        response = litellm.completion(
-            model=llm_cfg.get("model", "openai/moonshotai/kimi-k2.6"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=llm_cfg.get("temperature", 0.1),
-            max_tokens=200,
-            api_base=llm_cfg.get("api_base"),
-            api_key=llm_cfg.get("api_key") or __import__("os").getenv("NVIDIA_NIM_API_KEY"),
-        )
+        import os as _os
+        _model = llm_cfg.get("model", "groq/llama-3.3-70b-versatile")
+        _api_base = llm_cfg.get("api_base")
+        _api_key = llm_cfg.get("api_key") or _os.getenv("GROQ_API_KEY") or _os.getenv("NVIDIA_NIM_API_KEY")
+        _kwargs = dict(model=_model, messages=[{"role": "user", "content": prompt}],
+                       temperature=llm_cfg.get("temperature", 0.1), max_tokens=200,
+                       api_key=_api_key)
+        if _api_base:
+            _kwargs["api_base"] = _api_base
+        response = litellm.completion(**_kwargs)
         raw = response.choices[0].message.content.strip()
         # Strip markdown code fences if present
         if raw.startswith("```"):
@@ -221,6 +223,7 @@ class MasterAgent(Agent):
         symbol = (context or {}).get("symbol")
         if not symbol:
             return self._error("No symbol in context")
+        self._pm_id = str((context or {}).get("pm_id", "1"))
         return self.run_for_stock(symbol)
 
     def run_for_stock(self, symbol: str) -> AgentResult:
@@ -342,7 +345,7 @@ class MasterAgent(Agent):
         # If a model exists for this PM (>= 30 closed trades), surface its
         # P(trade profitable) as `meta_proba`. Downstream LLM prompt and
         # rule-based fallback can use it as a final confidence modifier.
-        pm_id = str((context or {}).get("pm_id", "1"))
+        pm_id = str(getattr(self, "_pm_id", "1"))
         try:
             from models.per_pm_meta import predict_proba as meta_predict
             meta_p = meta_predict(pm_id, scores)
