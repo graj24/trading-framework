@@ -65,7 +65,12 @@ class DataAgent(Agent):
             return self._error(str(e))
 
     def build_kb(self, symbol: str) -> dict:
-        """Build or update the knowledge base for a stock."""
+        """Build or update the knowledge base for a stock.
+
+        Each sub-fetch is wrapped so a single yfinance 429 (common on EC2)
+        doesn't abort the whole KB. Price history is the only critical piece;
+        fundamentals/earnings/corp-actions degrade gracefully.
+        """
         logger.info(f"Building knowledge base for {symbol}")
         init_kb(symbol)
 
@@ -74,50 +79,104 @@ class DataAgent(Agent):
 
         results = {}
 
-        # 1. Price history
-        results["price_history"] = self._fetch_price_history(symbol, yf_ticker)
+        def _safe(name: str, fn):
+            try:
+                return fn()
+            except Exception as e:
+                logger.warning(f"{symbol}: {name} failed: {e}")
+                return f"error: {type(e).__name__}"
 
-        # 2. Fundamentals
-        results["fundamentals"] = self._fetch_fundamentals(symbol, yf_ticker)
+        # 1. Price history (NSE-first, yfinance fallback) — critical
+        results["price_history"] = _safe(
+            "price_history", lambda: self._fetch_price_history(symbol, yf_ticker)
+        )
 
-        # 3. Earnings history + price reaction
-        results["earnings_history"] = self._fetch_earnings_history(symbol, yf_ticker)
+        # 2. Fundamentals (yfinance — may 429 on EC2)
+        results["fundamentals"] = _safe(
+            "fundamentals", lambda: self._fetch_fundamentals(symbol, yf_ticker)
+        )
+
+        # 3. Earnings history + price reaction (yfinance)
+        results["earnings_history"] = _safe(
+            "earnings_history", lambda: self._fetch_earnings_history(symbol, yf_ticker)
+        )
 
         # 4. Corporate actions (dividends, splits)
-        results["corporate_actions"] = self._fetch_corporate_actions(symbol, yf_ticker)
+        results["corporate_actions"] = _safe(
+            "corporate_actions", lambda: self._fetch_corporate_actions(symbol, yf_ticker)
+        )
 
         # 5. Sector correlation
-        results["sector_correlation"] = self._compute_sector_correlation(symbol)
+        results["sector_correlation"] = _safe(
+            "sector_correlation", lambda: self._compute_sector_correlation(symbol)
+        )
 
         # 6. Event reactions (derived from earnings history)
-        results["event_reactions"] = self._compute_event_reactions(symbol)
+        results["event_reactions"] = _safe(
+            "event_reactions", lambda: self._compute_event_reactions(symbol)
+        )
 
         # 7. Default signal weights
-        self._init_signal_weights(symbol)
+        _safe("signal_weights", lambda: self._init_signal_weights(symbol))
 
         logger.info(f"Knowledge base built for {symbol}: {results}")
         return {"symbol": symbol, "kb_results": results}
 
     def _fetch_price_history(self, symbol: str, ticker: yf.Ticker) -> str:
-        """Fetch OHLCV history and save as parquet."""
-        path = kb_path(symbol) / "price_history.parquet"
-        start = (datetime.now() - timedelta(days=self.history_years * 365)).strftime("%Y-%m-%d")
+        """Fetch OHLCV history and save as parquet.
 
-        # Incremental: only fetch new data if file exists
+        Strategy: try NSE direct (works on EC2 — Yahoo blocks AWS IPs);
+        fall back to yfinance only if NSE returns nothing.
+        """
+        path = kb_path(symbol) / "price_history.parquet"
+
+        # Determine fetch window — incremental if existing parquet present
         if path.exists():
             existing = pd.read_parquet(path)
             last_date = existing.index.max()
-            start = (last_date + timedelta(days=1)).strftime("%Y-%m-%d")
-            df = ticker.history(start=start, interval="1d")
-            if not df.empty:
-                df = pd.concat([existing, df])
-                df = df[~df.index.duplicated(keep="last")]
+            start_dt = (last_date + timedelta(days=1)).to_pydatetime() \
+                if hasattr(last_date, "to_pydatetime") else \
+                datetime.combine(last_date, datetime.min.time()) + timedelta(days=1)
         else:
-            df = ticker.history(start=start, interval="1d")
+            existing = None
+            start_dt = datetime.now() - timedelta(days=self.history_years * 365)
+
+        # Skip if already up to date
+        if start_dt.date() >= datetime.now().date():
+            logger.info(f"{symbol}: price history already up to date")
+            return f"{len(existing)} rows (no update)" if existing is not None else "up to date"
+
+        # 1. Try NSE direct
+        df = pd.DataFrame()
+        try:
+            from core.nse_historical import fetch_history as nse_fetch
+            df = nse_fetch(symbol, start=start_dt, end=datetime.now())
+        except Exception as e:
+            logger.warning(f"NSE historical failed for {symbol}: {e}")
+
+        # 2. Fall back to yfinance if NSE empty
+        if df.empty:
+            logger.info(f"{symbol}: NSE empty, falling back to yfinance")
+            try:
+                df = ticker.history(start=start_dt.strftime("%Y-%m-%d"), interval="1d")
+            except Exception as e:
+                logger.warning(f"yfinance fallback failed for {symbol}: {e}")
+                df = pd.DataFrame()
 
         if df.empty:
             logger.warning(f"No price data for {symbol}")
             return "empty"
+
+        # Strip timezone from index for parquet compatibility (NSE is naive, yfinance is aware)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
+        # Merge with existing if incremental
+        if existing is not None and not existing.empty:
+            if existing.index.tz is not None:
+                existing.index = existing.index.tz_localize(None)
+            df = pd.concat([existing, df])
+            df = df[~df.index.duplicated(keep="last")].sort_index()
 
         df.to_parquet(path)
         logger.info(f"{symbol}: {len(df)} days of price history saved")
