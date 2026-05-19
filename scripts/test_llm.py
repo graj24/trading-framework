@@ -19,6 +19,7 @@ for pm, model in [('PM1', 'openai/moonshotai/kimi-k2.6'), ('PM2', 'openai/deepse
             api_base='https://integrate.api.nvidia.com/v1',
             api_key=key,
             max_tokens=10,
+            timeout=15,
         )
         print(f"{pm} ({model}): OK — '{r.choices[0].message.content.strip()}'")
     except Exception as e:
