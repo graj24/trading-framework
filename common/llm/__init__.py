@@ -50,14 +50,17 @@ def _get_llm_config() -> dict:
 
 
 def _resolve_api_key(cfg: dict) -> Optional[str]:
-    """Try config field, then known env vars in priority order."""
+    """Try config field first, then a single explicit env var if set.
+
+    If neither is set, return None — letting litellm resolve the provider's
+    default env var (e.g. OPENAI_API_KEY for openai/, GROQ_API_KEY for groq/,
+    ANTHROPIC_API_KEY for anthropic/). This avoids cross-provider key confusion.
+    """
     if cfg.get("api_key"):
         return cfg["api_key"]
-    for var in API_KEY_ENV_VARS:
-        v = os.getenv(var)
-        if v:
-            return v
-    return None
+    # Only use LLM_API_KEY as a generic override; otherwise let litellm pick
+    # the provider-specific env var natively.
+    return os.getenv("LLM_API_KEY")
 
 
 def _resolve_model(cfg: dict, override: Optional[str], tier: str) -> str:
