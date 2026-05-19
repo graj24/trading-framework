@@ -25,7 +25,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from core import features as F
 
@@ -37,13 +36,13 @@ FORWARD_DAYS    = 5     # predict 5-day forward return
 MIN_AUC_DELTA   = -0.02 # new model must not be worse than this vs incumbent
 
 SECTOR_INDICES = {
-    "nifty":     "^NSEI",
-    "banknifty": "^NSEBANK",
-    "vix":       "^INDIAVIX",
-    "fmcg":      "^CNXFMCG",
-    "it":        "^CNXIT",
-    "auto":      "^CNXAUTO",
-    "energy":    "^CNXENERGY",
+    "nifty":     "NIFTY 50",
+    "banknifty": "NIFTY BANK",
+    "vix":       "India VIX",
+    "fmcg":      "NIFTY FMCG",
+    "it":        "NIFTY IT",
+    "auto":      "NIFTY AUTO",
+    "energy":    "NIFTY ENERGY",
 }
 
 # ── Indicator helpers ─────────────────────────────────────────────────────────
@@ -125,53 +124,61 @@ def build_labels(df: pd.DataFrame) -> pd.Series:
 # ── Load market data ──────────────────────────────────────────────────────────
 
 def load_market_data(start: str, end: str) -> dict[str, pd.Series]:
-    """Load NIFTY + sector + VIX series for the given date range.
+    """Load NIFTY + sector + VIX series using jugaad-data (works on EC2).
 
-    C.1: results are cached at ``stocks/_market_data.parquet`` with the
-    fetched (start, end) range stored in metadata. The cache hits when the
-    range fully covers a request, so a 50-symbol predict cycle no longer
-    hammers yfinance with 350 requests.
+    Cached at stocks/_market_data.parquet. Cache hits when the stored range
+    fully covers the request, so a 50-symbol predict cycle doesn't re-fetch.
     """
     cache_path = Path("stocks/_market_data.parquet")
     cache_meta = Path("stocks/_market_data.meta")
 
-    # Try cache first.
     if cache_path.exists() and cache_meta.exists():
         try:
             meta = cache_meta.read_text().strip().split("|")
             cached_start, cached_end = meta[0], meta[1]
             if cached_start <= start and cached_end >= end:
                 df = pd.read_parquet(cache_path)
-                # Slice by date range.
                 df.index = pd.to_datetime(df.index)
                 mask = (df.index >= start) & (df.index <= end)
                 df = df[mask]
                 if not df.empty:
                     return {col: df[col].dropna() for col in df.columns}
         except Exception:
-            pass  # cache corrupted — refetch
-
-    # Cache miss. Fetch fresh.
-    market: dict[str, pd.Series] = {}
-    for name, ticker in SECTOR_INDICES.items():
-        try:
-            df = yf.Ticker(ticker).history(start=start, end=end, interval="1d")
-            if not df.empty:
-                s = df["Close"]
-                s.index = pd.to_datetime(s.index, utc=True).tz_localize(None)
-                market[name] = s
-        except Exception:
             pass
 
-    # Persist to cache.
+    market: dict[str, pd.Series] = {}
+    try:
+        from jugaad_data.nse import index_df
+        from datetime import datetime as _dt
+        start_dt = _dt.strptime(start, "%Y-%m-%d").date()
+        end_dt   = _dt.strptime(end,   "%Y-%m-%d").date()
+
+        for name, index_name in SECTOR_INDICES.items():
+            try:
+                raw = index_df(index_name, from_date=start_dt, to_date=end_dt)
+                if raw is None or raw.empty:
+                    continue
+                # jugaad returns HistoricalData with a "Close" or "CLOSING" col
+                close_col = next((c for c in raw.columns if "clos" in c.lower()), None)
+                date_col  = next((c for c in raw.columns if "date" in c.lower()), None)
+                if close_col is None or date_col is None:
+                    continue
+                s = raw.set_index(date_col)[close_col]
+                s.index = pd.to_datetime(s.index, errors="coerce").normalize()
+                s = pd.to_numeric(s, errors="coerce").dropna().sort_index()
+                market[name] = s
+            except Exception as e:
+                pass
+    except ImportError:
+        pass
+
     if market:
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            combined = pd.DataFrame(market)
-            combined.to_parquet(cache_path)
+            pd.DataFrame(market).to_parquet(cache_path)
             cache_meta.write_text(f"{start}|{end}")
         except Exception:
-            pass  # writing the cache is best-effort
+            pass
 
     return market
 

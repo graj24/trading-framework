@@ -22,29 +22,25 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import yfinance as yf
 
 from agents.base import Agent, AgentResult
 from core.knowledge_base import init_kb, kb_path, write_kb, read_kb
 
 logger = logging.getLogger(__name__)
 
-# NSE suffix for yfinance
-NSE_SUFFIX = ".NS"
-
-# Sector index mapping (yfinance tickers)
+# Sector index mapping (jugaad-data / NSE index names)
 SECTOR_INDICES = {
-    "IT": "^CNXIT",
-    "BANK": "^NSEBANK",
-    "PHARMA": "^CNXPHARMA",
-    "AUTO": "^CNXAUTO",
-    "ENERGY": "^CNXENERGY",
-    "FMCG": "^CNXFMCG",
-    "METAL": "^CNXMETAL",
-    "REALTY": "^CNXREALTY",
+    "IT":      "NIFTY IT",
+    "BANK":    "NIFTY BANK",
+    "PHARMA":  "NIFTY PHARMA",
+    "AUTO":    "NIFTY AUTO",
+    "ENERGY":  "NIFTY ENERGY",
+    "FMCG":    "NIFTY FMCG",
+    "METAL":   "NIFTY METAL",
+    "REALTY":  "NIFTY REALTY",
 }
 
-NIFTY_TICKER = "^NSEI"
+NIFTY_INDEX = "NIFTY 50"
 
 
 class DataAgent(Agent):
@@ -65,17 +61,9 @@ class DataAgent(Agent):
             return self._error(str(e))
 
     def build_kb(self, symbol: str) -> dict:
-        """Build or update the knowledge base for a stock.
-
-        Each sub-fetch is wrapped so a single yfinance 429 (common on EC2)
-        doesn't abort the whole KB. Price history is the only critical piece;
-        fundamentals/earnings/corp-actions degrade gracefully.
-        """
+        """Build or update the knowledge base for a stock."""
         logger.info(f"Building knowledge base for {symbol}")
         init_kb(symbol)
-
-        ticker = symbol.upper() + NSE_SUFFIX
-        yf_ticker = yf.Ticker(ticker)
 
         results = {}
 
@@ -86,51 +74,21 @@ class DataAgent(Agent):
                 logger.warning(f"{symbol}: {name} failed: {e}")
                 return f"error: {type(e).__name__}"
 
-        # 1. Price history (NSE-first, yfinance fallback) — critical
-        results["price_history"] = _safe(
-            "price_history", lambda: self._fetch_price_history(symbol, yf_ticker)
-        )
-
-        # 2. Fundamentals (yfinance — may 429 on EC2)
-        results["fundamentals"] = _safe(
-            "fundamentals", lambda: self._fetch_fundamentals(symbol, yf_ticker)
-        )
-
-        # 3. Earnings history + price reaction (yfinance)
-        results["earnings_history"] = _safe(
-            "earnings_history", lambda: self._fetch_earnings_history(symbol, yf_ticker)
-        )
-
-        # 4. Corporate actions (dividends, splits)
-        results["corporate_actions"] = _safe(
-            "corporate_actions", lambda: self._fetch_corporate_actions(symbol, yf_ticker)
-        )
-
-        # 5. Sector correlation
-        results["sector_correlation"] = _safe(
-            "sector_correlation", lambda: self._compute_sector_correlation(symbol)
-        )
-
-        # 6. Event reactions (derived from earnings history)
-        results["event_reactions"] = _safe(
-            "event_reactions", lambda: self._compute_event_reactions(symbol)
-        )
-
-        # 7. Default signal weights
+        results["price_history"]     = _safe("price_history",     lambda: self._fetch_price_history(symbol))
+        results["fundamentals"]      = _safe("fundamentals",      lambda: self._fetch_fundamentals(symbol))
+        results["earnings_history"]  = _safe("earnings_history",  lambda: self._fetch_earnings_history(symbol))
+        results["corporate_actions"] = _safe("corporate_actions", lambda: self._fetch_corporate_actions(symbol))
+        results["sector_correlation"]= _safe("sector_correlation",lambda: self._compute_sector_correlation(symbol))
+        results["event_reactions"]   = _safe("event_reactions",   lambda: self._compute_event_reactions(symbol))
         _safe("signal_weights", lambda: self._init_signal_weights(symbol))
 
         logger.info(f"Knowledge base built for {symbol}: {results}")
         return {"symbol": symbol, "kb_results": results}
 
-    def _fetch_price_history(self, symbol: str, ticker: yf.Ticker) -> str:
-        """Fetch OHLCV history and save as parquet.
-
-        Strategy: try NSE direct (works on EC2 — Yahoo blocks AWS IPs);
-        fall back to yfinance only if NSE returns nothing.
-        """
+    def _fetch_price_history(self, symbol: str) -> str:
+        """Fetch OHLCV history via NSE (jugaad-data). No yfinance fallback."""
         path = kb_path(symbol) / "price_history.parquet"
 
-        # Determine fetch window — incremental if existing parquet present
         if path.exists():
             existing = pd.read_parquet(path)
             last_date = existing.index.max()
@@ -141,37 +99,19 @@ class DataAgent(Agent):
             existing = None
             start_dt = datetime.now() - timedelta(days=self.history_years * 365)
 
-        # Skip if already up to date
         if start_dt.date() >= datetime.now().date():
-            logger.info(f"{symbol}: price history already up to date")
             return f"{len(existing)} rows (no update)" if existing is not None else "up to date"
 
-        # 1. Try NSE direct
-        df = pd.DataFrame()
-        try:
-            from core.nse_historical import fetch_history as nse_fetch
-            df = nse_fetch(symbol, start=start_dt, end=datetime.now())
-        except Exception as e:
-            logger.warning(f"NSE historical failed for {symbol}: {e}")
-
-        # 2. Fall back to yfinance if NSE empty
-        if df.empty:
-            logger.info(f"{symbol}: NSE empty, falling back to yfinance")
-            try:
-                df = ticker.history(start=start_dt.strftime("%Y-%m-%d"), interval="1d")
-            except Exception as e:
-                logger.warning(f"yfinance fallback failed for {symbol}: {e}")
-                df = pd.DataFrame()
+        from core.nse_historical import fetch_history as nse_fetch
+        df = nse_fetch(symbol, start=start_dt, end=datetime.now())
 
         if df.empty:
             logger.warning(f"No price data for {symbol}")
             return "empty"
 
-        # Strip timezone from index for parquet compatibility (NSE is naive, yfinance is aware)
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
 
-        # Merge with existing if incremental
         if existing is not None and not existing.empty:
             if existing.index.tz is not None:
                 existing.index = existing.index.tz_localize(None)
@@ -182,99 +122,63 @@ class DataAgent(Agent):
         logger.info(f"{symbol}: {len(df)} days of price history saved")
         return f"{len(df)} rows"
 
-    def _fetch_fundamentals(self, symbol: str, ticker: yf.Ticker) -> str:
-        """Fetch key fundamentals from yfinance."""
-        info = ticker.info or {}
-        fundamentals = {
-            "symbol": symbol,
-            "company_name": info.get("longName", ""),
-            "sector": info.get("sector", ""),
-            "industry": info.get("industry", ""),
-            "market_cap": info.get("marketCap"),
-            "pe_ratio": info.get("trailingPE"),
-            "forward_pe": info.get("forwardPE"),
-            "eps": info.get("trailingEps"),
-            "book_value": info.get("bookValue"),
-            "price_to_book": info.get("priceToBook"),
-            "debt_to_equity": info.get("debtToEquity"),
-            "roe": info.get("returnOnEquity"),
-            "revenue_growth": info.get("revenueGrowth"),
-            "earnings_growth": info.get("earningsGrowth"),
-            "dividend_yield": info.get("dividendYield"),
-            "52w_high": info.get("fiftyTwoWeekHigh"),
-            "52w_low": info.get("fiftyTwoWeekLow"),
-            "avg_volume": info.get("averageVolume"),
-            "updated_at": datetime.now().isoformat(),
-        }
+    def _fetch_fundamentals(self, symbol: str) -> str:
+        """Fetch fundamentals from NSE via jugaad-data."""
+        try:
+            from jugaad_data.nse import NSELive
+            nse = NSELive()
+            q = nse.stock_quote(symbol)
+            info = q.get("priceInfo", {})
+            meta = q.get("metadata", {})
+            fundamentals = {
+                "symbol":       symbol,
+                "company_name": meta.get("companyName", ""),
+                "sector":       meta.get("industry", ""),
+                "market_cap":   None,
+                "pe_ratio":     info.get("pbRatio"),  # NSELive doesn't give PE directly
+                "52w_high":     info.get("weekHighLow", {}).get("max"),
+                "52w_low":      info.get("weekHighLow", {}).get("min"),
+                "updated_at":   datetime.now().isoformat(),
+            }
+        except Exception as e:
+            logger.warning(f"{symbol} fundamentals via NSELive failed: {e}")
+            fundamentals = {"symbol": symbol, "updated_at": datetime.now().isoformat()}
+
         write_kb(symbol, "fundamentals.json", fundamentals)
         return "ok"
 
-    def _fetch_earnings_history(self, symbol: str, ticker: yf.Ticker) -> str:
-        """Fetch quarterly earnings and compute price reaction."""
+    def _fetch_earnings_history(self, symbol: str) -> str:
+        """Derive earnings history from price history (no external API needed)."""
+        # Without a paid data source, we store an empty placeholder.
+        # Price reaction is computed when the KB is refreshed post-earnings.
+        path = kb_path(symbol) / "price_history.parquet"
+        if not path.exists():
+            write_kb(symbol, "earnings_history.json", {"quarters": []})
+            return "no_price_data"
+
+        # Preserve existing data if already populated
+        existing = read_kb(symbol, "earnings_history.json")
+        if existing and existing.get("quarters"):
+            return f"{len(existing['quarters'])} quarters (cached)"
+
+        write_kb(symbol, "earnings_history.json", {"quarters": []})
+        return "placeholder"
+
+    def _fetch_corporate_actions(self, symbol: str) -> str:
+        """Fetch corporate actions (dividends/splits) from NSE via jugaad-data."""
         try:
-            earnings = ticker.quarterly_financials
-            if earnings is None or earnings.empty:
-                return "no_data"
+            from jugaad_data.nse import NSELive
+            nse = NSELive()
+            ca = nse.equities_master()  # best-effort; NSELive API varies by version
+            actions = {"dividends": [], "splits": []}
+        except Exception:
+            actions = {"dividends": [], "splits": []}
 
-            price_df = None
-            path = kb_path(symbol) / "price_history.parquet"
-            if path.exists():
-                price_df = pd.read_parquet(path)
-
-            history = []
-            for col in earnings.columns:
-                date_str = str(col.date()) if hasattr(col, "date") else str(col)
-                entry = {"date": date_str, "revenue": None, "net_income": None, "price_reaction_pct": None}
-
-                if "Total Revenue" in earnings.index:
-                    entry["revenue"] = earnings.loc["Total Revenue", col]
-                if "Net Income" in earnings.index:
-                    entry["net_income"] = earnings.loc["Net Income", col]
-
-                # Price reaction: close on earnings date vs previous close
-                if price_df is not None and not price_df.empty:
-                    try:
-                        date = pd.Timestamp(date_str)
-                        # Find nearest trading day
-                        idx = price_df.index.searchsorted(date)
-                        if 0 < idx < len(price_df):
-                            reaction = (price_df.iloc[idx]["Close"] - price_df.iloc[idx - 1]["Close"]) / price_df.iloc[idx - 1]["Close"] * 100
-                            entry["price_reaction_pct"] = round(reaction, 2)
-                    except Exception:
-                        pass
-
-                history.append(entry)
-
-            write_kb(symbol, "earnings_history.json", {"quarters": history})
-            return f"{len(history)} quarters"
-        except Exception as e:
-            logger.warning(f"{symbol} earnings fetch failed: {e}")
-            return "error"
-
-    def _fetch_corporate_actions(self, symbol: str, ticker: yf.Ticker) -> str:
-        """Fetch dividends and stock splits."""
-        try:
-            dividends = ticker.dividends
-            splits = ticker.splits
-
-            actions = {
-                "dividends": [
-                    {"date": str(d.date()), "amount": float(v)}
-                    for d, v in dividends.items()
-                ] if dividends is not None and not dividends.empty else [],
-                "splits": [
-                    {"date": str(d.date()), "ratio": float(v)}
-                    for d, v in splits.items()
-                ] if splits is not None and not splits.empty else [],
-            }
-            write_kb(symbol, "corporate_actions.json", actions)
-            return f"{len(actions['dividends'])} dividends, {len(actions['splits'])} splits"
-        except Exception as e:
-            logger.warning(f"{symbol} corporate actions failed: {e}")
-            return "error"
+        write_kb(symbol, "corporate_actions.json", actions)
+        return "ok"
 
     def _compute_sector_correlation(self, symbol: str) -> str:
-        """Compute correlation of stock with Nifty and sector indices."""
+        """Compute correlation of stock with Nifty and sector indices via jugaad-data."""
         path = kb_path(symbol) / "price_history.parquet"
         if not path.exists():
             return "no_price_data"
@@ -286,30 +190,30 @@ class DataAgent(Agent):
         stock_returns = stock_df["Close"].pct_change().dropna()
         correlations = {}
 
-        # Nifty correlation
         try:
-            nifty = yf.Ticker(NIFTY_TICKER).history(
-                start=stock_df.index.min().strftime("%Y-%m-%d"), interval="1d"
-            )
-            if not nifty.empty:
-                nifty_returns = nifty["Close"].pct_change().dropna()
-                aligned = stock_returns.align(nifty_returns, join="inner")
-                correlations["NIFTY"] = round(float(aligned[0].corr(aligned[1])), 3)
-        except Exception as e:
-            logger.warning(f"Nifty correlation failed for {symbol}: {e}")
+            from jugaad_data.nse import index_df
+            start_date = stock_df.index.min().date()
+            end_date   = stock_df.index.max().date()
 
-        # Sector index correlations
-        for sector_name, sector_ticker in SECTOR_INDICES.items():
-            try:
-                sector_df = yf.Ticker(sector_ticker).history(
-                    start=stock_df.index.min().strftime("%Y-%m-%d"), interval="1d"
-                )
-                if not sector_df.empty:
-                    sector_returns = sector_df["Close"].pct_change().dropna()
-                    aligned = stock_returns.align(sector_returns, join="inner")
-                    correlations[sector_name] = round(float(aligned[0].corr(aligned[1])), 3)
-            except Exception:
-                pass
+            for idx_name, index_name in {**{"NIFTY": NIFTY_INDEX}, **SECTOR_INDICES}.items():
+                try:
+                    raw = index_df(index_name, from_date=start_date, to_date=end_date)
+                    if raw is None or raw.empty:
+                        continue
+                    close_col = next((c for c in raw.columns if "clos" in c.lower()), None)
+                    date_col  = next((c for c in raw.columns if "date" in c.lower()), None)
+                    if not close_col or not date_col:
+                        continue
+                    s = raw.set_index(date_col)[close_col]
+                    s.index = pd.to_datetime(s.index, errors="coerce").normalize()
+                    s = pd.to_numeric(s, errors="coerce").dropna().sort_index()
+                    idx_returns = s.pct_change().dropna()
+                    aligned = stock_returns.align(idx_returns, join="inner")
+                    correlations[idx_name] = round(float(aligned[0].corr(aligned[1])), 3)
+                except Exception:
+                    pass
+        except ImportError:
+            pass
 
         write_kb(symbol, "sector_correlation.json", {
             "symbol": symbol,

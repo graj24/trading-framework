@@ -1,11 +1,11 @@
 """Pluggable DataSource interface.
 
 Each PM can register its own data sources. The framework provides
-GrowwSource and YFinanceSource as built-ins.
+NSESource and GrowwSource as built-ins.
 
 Usage:
     from common.data_sources import get_source, register_source
-    quote = get_source("yfinance").get_quote("RELIANCE")
+    quote = get_source("nse").get_quote("RELIANCE")
 """
 from __future__ import annotations
 
@@ -65,36 +65,36 @@ class DataSource(ABC):
         raise NotSupported(f"{self.name} does not support search_symbols")
 
 
-# ── Built-in: YFinance ────────────────────────────────────────────────────────
+# ── Built-in: NSE (jugaad-data) ───────────────────────────────────────────────
 
-class YFinanceSource(DataSource):
+class NSESource(DataSource):
     @property
     def name(self) -> str:
-        return "yfinance"
+        return "nse"
 
     def get_quote(self, symbol: str) -> Quote:
-        import yfinance as yf
-        from common.core.symbols import to_yfinance_ticker
-        ticker = to_yfinance_ticker(symbol)
-        t = yf.Ticker(ticker)
-        hist = t.history(period="1d")
-        if hist.empty:
+        try:
+            from jugaad_data.nse import NSELive
+            nse = NSELive()
+            q = nse.stock_quote(symbol)
+            price_info = q.get("priceInfo", {})
+            ltp = float(price_info.get("lastPrice", 0))
+            return Quote(
+                symbol=symbol,
+                ltp=ltp,
+                open=float(price_info.get("open", 0)),
+                high=float(price_info.get("intraDayHighLow", {}).get("max", 0)),
+                low=float(price_info.get("intraDayHighLow", {}).get("min", 0)),
+                close=float(price_info.get("previousClose", 0)),
+            )
+        except Exception as e:
+            logger.debug(f"NSESource.get_quote({symbol}) failed: {e}")
             return Quote(symbol=symbol, ltp=0.0)
-        row = hist.iloc[-1]
-        return Quote(
-            symbol=symbol,
-            ltp=float(row["Close"]),
-            open=float(row["Open"]),
-            high=float(row["High"]),
-            low=float(row["Low"]),
-            close=float(row["Close"]),
-            volume=int(row["Volume"]),
-        )
 
     def get_history(self, symbol: str, period: str = "1y", interval: str = "1d") -> Any:
-        import yfinance as yf
-        from common.core.symbols import to_yfinance_ticker
-        return yf.Ticker(to_yfinance_ticker(symbol)).history(period=period, interval=interval)
+        from core.nse_historical import fetch_history
+        years = {"1y": 1, "2y": 2, "5y": 5}.get(period, 1)
+        return fetch_history(symbol, years=years)
 
 
 # ── Built-in: Groww ───────────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ def list_sources() -> list[str]:
 
 def _auto_register(name: str) -> None:
     """Lazily register built-in sources on first access."""
-    if name == "yfinance":
-        register_source(YFinanceSource())
+    if name in ("nse", "yfinance"):  # accept "yfinance" as alias for backwards compat
+        register_source(NSESource())
     elif name == "groww":
         register_source(GrowwSource())
