@@ -6,11 +6,12 @@ data:
   - 15m
   - 5m
 llm:
-  # Provider: OpenAI direct (using OPENAI_API_KEY from env)
-  # GPT-4o-mini: $0.15/M input, $0.60/M output — cheap, fast, good tool calling.
-  # Switch model string only to swap to other OpenAI/Anthropic/etc. models.
-  model: openai/gpt-4o-mini
-  api_base: https://api.openai.com/v1
+  # Provider: Groq (free tier, GROQ_API_KEY from env)
+  # 100k tokens/day cap on free tier — resets at 00:00 UTC (05:30 IST).
+  # OPENAI_API_KEY and ANTHROPIC_API_KEY are empty on EC2 — paste a key into
+  # /app/.env and switch model to openai/gpt-4o-mini or anthropic/claude-haiku.
+  model: groq/llama-3.3-70b-versatile
+  api_base: https://api.groq.com/openai/v1
   max_tokens: 2000
   temperature: 0.1
 logging:
