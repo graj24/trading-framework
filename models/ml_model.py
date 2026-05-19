@@ -353,6 +353,13 @@ def train():
                     .dropna())
         combined = combined.iloc[:-FORWARD_DAYS]
 
+        # Skip stocks with too few samples or corrupted returns (>50% in 5 days = bad data)
+        if len(combined) < 200:
+            continue
+        combined = combined[combined["fwd_pct"].abs() <= 50]
+        if len(combined) < 200:
+            continue
+
         all_X.append(combined.drop(["label", "fwd_pct"], axis=1))
         all_y.append(combined["label"])
         all_fwd.append(combined["fwd_pct"])
