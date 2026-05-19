@@ -1,4 +1,4 @@
-"""Quick test to verify NVIDIA NIM LLM connectivity. Run on EC2:
+"""Quick test to verify Groq LLM connectivity. Run on EC2:
     PYTHONPATH=/app python scripts/test_llm.py
 """
 import os, sys
@@ -8,15 +8,14 @@ from dotenv import load_dotenv
 load_dotenv()
 import litellm
 
-key = os.getenv('NVIDIA_NIM_API_KEY', '')
-print(f"Key set: {'yes' if key else 'NO - set NVIDIA_NIM_API_KEY in /app/.env'}")
+key = os.getenv('GROQ_API_KEY', '')
+print(f"GROQ_API_KEY set: {'yes' if key else 'NO - set GROQ_API_KEY in /app/.env'}")
 
-for pm, model in [('PM1', 'openai/moonshotai/kimi-k2.6'), ('PM2', 'openai/deepseek-ai/deepseek-v3-1')]:
+for pm, model in [('PM1', 'groq/llama-3.3-70b-versatile'), ('PM2', 'groq/llama-3.3-70b-versatile')]:
     try:
         r = litellm.completion(
             model=model,
             messages=[{'role': 'user', 'content': 'say hi in one word'}],
-            api_base='https://integrate.api.nvidia.com/v1',
             api_key=key,
             max_tokens=10,
             timeout=15,
