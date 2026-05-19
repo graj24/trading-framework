@@ -7,7 +7,7 @@
 set -e
 
 EC2_IP="${1:?Usage: deploy.sh <elastic-ip> [path-to-pem]}"
-PEM="${2:-~/.ssh/trading-key.pem}"
+PEM="${2:-~/.ssh/id_ed25519}"
 REMOTE="ec2-user@${EC2_IP}"
 
 echo "==> Syncing code to ${REMOTE}:/app ..."
