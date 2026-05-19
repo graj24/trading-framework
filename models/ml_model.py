@@ -36,13 +36,21 @@ FORWARD_DAYS    = 5     # predict 5-day forward return
 MIN_AUC_DELTA   = -0.02 # new model must not be worse than this vs incumbent
 
 SECTOR_INDICES = {
-    "nifty":     "NIFTY 50",
-    "banknifty": "NIFTY BANK",
-    "vix":       "India VIX",
-    "fmcg":      "NIFTY FMCG",
-    "it":        "NIFTY IT",
-    "auto":      "NIFTY AUTO",
-    "energy":    "NIFTY ENERGY",
+    "nifty":     "nifty",
+    "banknifty": "banknifty",
+    "fmcg":      "fmcg",
+    "it":        "it",
+    "auto":      "auto",
+    "energy":    "energy",
+}
+
+# Sector membership for Nifty 50 stocks (used to compute sector proxy returns)
+_SECTOR_STOCKS: dict[str, list[str]] = {
+    "banknifty": ["HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK", "INDUSINDBK"],
+    "it":        ["TCS", "INFY", "WIPRO", "HCLTECH", "TECHM"],
+    "fmcg":      ["HINDUNILVR", "ITC", "NESTLEIND", "BRITANNIA", "TATACONSUM"],
+    "auto":      ["MARUTI", "EICHERMOT", "HEROMOTOCO", "M&M"],
+    "energy":    ["RELIANCE", "ONGC", "BPCL", "COALINDIA", "NTPC", "POWERGRID"],
 }
 
 # ── Indicator helpers ─────────────────────────────────────────────────────────
@@ -124,10 +132,11 @@ def build_labels(df: pd.DataFrame) -> pd.Series:
 # ── Load market data ──────────────────────────────────────────────────────────
 
 def load_market_data(start: str, end: str) -> dict[str, pd.Series]:
-    """Load NIFTY + sector + VIX series using jugaad-data (works on EC2).
+    """Compute market context series from local price_history parquets.
 
-    Cached at stocks/_market_data.parquet. Cache hits when the stored range
-    fully covers the request, so a 50-symbol predict cycle doesn't re-fetch.
+    No external API calls — derives NIFTY proxy and sector indices as
+    equal-weight averages of constituent stocks already on disk.
+    Cached at stocks/_market_data.parquet.
     """
     cache_path = Path("stocks/_market_data.parquet")
     cache_meta = Path("stocks/_market_data.meta")
@@ -146,31 +155,39 @@ def load_market_data(start: str, end: str) -> dict[str, pd.Series]:
         except Exception:
             pass
 
-    market: dict[str, pd.Series] = {}
-    try:
-        from jugaad_data.nse import index_df
-        from datetime import datetime as _dt
-        start_dt = _dt.strptime(start, "%Y-%m-%d").date()
-        end_dt   = _dt.strptime(end,   "%Y-%m-%d").date()
+    def _load_close(symbol: str) -> pd.Series | None:
+        p = Path("stocks") / symbol / "price_history.parquet"
+        if not p.exists():
+            return None
+        try:
+            df = pd.read_parquet(p)
+            df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
+            return df["Close"].sort_index()
+        except Exception:
+            return None
 
-        for name, index_name in SECTOR_INDICES.items():
-            try:
-                raw = index_df(index_name, from_date=start_dt, to_date=end_dt)
-                if raw is None or raw.empty:
-                    continue
-                # jugaad returns HistoricalData with a "Close" or "CLOSING" col
-                close_col = next((c for c in raw.columns if "clos" in c.lower()), None)
-                date_col  = next((c for c in raw.columns if "date" in c.lower()), None)
-                if close_col is None or date_col is None:
-                    continue
-                s = raw.set_index(date_col)[close_col]
-                s.index = pd.to_datetime(s.index, errors="coerce").normalize()
-                s = pd.to_numeric(s, errors="coerce").dropna().sort_index()
-                market[name] = s
-            except Exception as e:
-                pass
-    except ImportError:
-        pass
+    # All available stocks → NIFTY proxy
+    all_closes = []
+    all_parquets = sorted(Path("stocks").glob("*/price_history.parquet"))
+    for p in all_parquets:
+        symbol = p.parent.name
+        s = _load_close(symbol)
+        if s is not None and not s.empty:
+            all_closes.append(s.rename(symbol))
+
+    market: dict[str, pd.Series] = {}
+
+    if all_closes:
+        combined = pd.concat(all_closes, axis=1).sort_index()
+        # NIFTY proxy: equal-weight normalised price (base=100 at first row)
+        normed = combined / combined.iloc[0] * 100
+        market["nifty"] = normed.mean(axis=1)
+
+        # Sector proxies
+        for sector, members in _SECTOR_STOCKS.items():
+            cols = [m for m in members if m in combined.columns]
+            if cols:
+                market[sector] = (combined[cols] / combined[cols].iloc[0] * 100).mean(axis=1)
 
     if market:
         try:
