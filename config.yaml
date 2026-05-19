@@ -6,13 +6,11 @@ data:
   - 15m
   - 5m
 llm:
-  # Provider: AgentRouter (OpenAI-compatible Chat Completions endpoint)
-  # API key resolved from AGENTROUTER_API_KEY env var (see common/llm/__init__.py)
-  # Available models on AgentRouter (verify exact names at agentrouter.org/console):
-  #   deepseek-v4-pro, deepseek-v4-flash, claude-sonnet-4-5-20250929,
-  #   claude-haiku-4-5-20251001, gpt-5
-  model: openai/deepseek-v4-pro
-  api_base: https://agentrouter.org/v1
+  # Provider: OpenAI direct (using OPENAI_API_KEY from env)
+  # GPT-4o-mini: $0.15/M input, $0.60/M output — cheap, fast, good tool calling.
+  # Switch model string only to swap to other OpenAI/Anthropic/etc. models.
+  model: openai/gpt-4o-mini
+  api_base: https://api.openai.com/v1
   max_tokens: 2000
   temperature: 0.1
 logging:
