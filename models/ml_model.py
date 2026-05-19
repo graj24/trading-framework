@@ -53,6 +53,24 @@ _SECTOR_STOCKS: dict[str, list[str]] = {
     "energy":    ["RELIANCE", "ONGC", "BPCL", "COALINDIA", "NTPC", "POWERGRID"],
 }
 
+# Market cap tiers: 0=Nifty50 large cap, 1=Nifty Next 50 mid-large, 2=other mid/small
+_NIFTY_50 = {
+    "RELIANCE","TCS","HDFCBANK","BHARTIARTL","ICICIBANK","SBIN","INFY",
+    "HINDUNILVR","WIPRO","HCLTECH","BAJFINANCE","MARUTI","LT","AXISBANK",
+    "KOTAKBANK","SUNPHARMA","TITAN","ULTRACEMCO","NTPC","ONGC","COALINDIA",
+    "POWERGRID","BAJAJFINSV","ASIANPAINT","TECHM","ADANIENT","ADANIPORTS",
+    "JSWSTEEL","TATASTEEL","HINDALCO","CIPLA","DIVISLAB","DRREDDY","GRASIM",
+    "APOLLOHOSP","HDFCLIFE","SBILIFE","ITC","NESTLEIND","BRITANNIA","EICHERMOT",
+    "HEROMOTOCO","INDUSINDBK","BAJAJ_AUTO","BPCL","TATACONSUM","INDIGO",
+    "ETERNAL","M&M","TATAMOTORS",
+}
+_NIFTY_NEXT_50 = {
+    "ADANIGREEN","ADANIPOWER","AMBUJACEM","BANKBARODA","CHOLAFIN","COLPAL",
+    "DABUR","DLF","GODREJCP","HAVELLS","IRCTC","LODHA","LTIM","LUPIN",
+    "MARICO","MUTHOOTFIN","NAUKRI","NHPC","PIDILITIND","SIEMENS","TORNTPHARM",
+    "TRENT","UNIONBANK","VEDL","ZOMATO","ANGELONE","CDSL","BSE",
+}
+
 # ── Indicator helpers ─────────────────────────────────────────────────────────
 
 # Indicators: see core/features.py. Use F.ema, F.rsi, F.macd_hist, F.atr,
@@ -60,7 +78,8 @@ _SECTOR_STOCKS: dict[str, list[str]] = {
 
 # ── Feature engineering ───────────────────────────────────────────────────────
 
-def build_features(df: pd.DataFrame, market_data: dict[str, pd.Series]) -> pd.DataFrame:
+def build_features(df: pd.DataFrame, market_data: dict[str, pd.Series],
+                   symbol: str = "") -> pd.DataFrame:
     """Build 30+ features from OHLCV + market context."""
     c, h, l, v = df["Close"], df["High"], df["Low"], df["Volume"]
 
@@ -119,6 +138,16 @@ def build_features(df: pd.DataFrame, market_data: dict[str, pd.Series]) -> pd.Da
     month = pd.to_datetime(df.index).month
     feat["month_sin"] = np.sin(2 * np.pi * month / 12)
     feat["month_cos"] = np.cos(2 * np.pi * month / 12)
+
+    # ── Market cap tier ───────────────────────────────────────────────────────
+    # 0 = Nifty 50 (large cap), 1 = Nifty Next 50, 2 = mid/small cap
+    if symbol.upper() in _NIFTY_50:
+        tier = 0
+    elif symbol.upper() in _NIFTY_NEXT_50:
+        tier = 1
+    else:
+        tier = 2
+    feat["market_cap_tier"] = tier
 
     return feat.replace([np.inf, -np.inf], np.nan)
 
@@ -343,7 +372,7 @@ def train():
         df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
         df = df.dropna(subset=["Open","High","Low","Close","Volume"])
 
-        feat = build_features(df, market_data)
+        feat = build_features(df, market_data, symbol=symbol)
         labels = build_labels(df)
         fwd_pct = (df["Close"].shift(-FORWARD_DAYS) / df["Close"] - 1) * 100
 
@@ -515,7 +544,7 @@ def predict(symbol: str) -> dict:
         str(df.index.min().date()), str(df.index.max().date())
     )
 
-    feat = build_features(df, market_data)
+    feat = build_features(df, market_data, symbol=symbol)
     latest = feat.iloc[[-1]][features].fillna(0)
 
     proba = model.predict_proba(latest)[0][1]
