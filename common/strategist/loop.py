@@ -171,7 +171,7 @@ When done, return a JSON object as your final message:
             from common.tools import get_tool_schemas, dispatch
 
             cfg = get_config()
-            model = cfg.get("llm", {}).get("model", "openai/moonshotai/kimi-k2.6")
+            model = cfg.get("llm", {}).get("model", "groq/llama-3.3-70b-versatile")
             # Note: 70b-versatile has 12000 TPM on free tier vs 6000 for 8b-instant
             # so we use the same model for off-shift to avoid rate limits.
 
@@ -183,16 +183,21 @@ When done, return a JSON object as your final message:
                 # Retry with backoff on 429
                 for attempt in range(4):
                     try:
-                        resp = litellm.completion(
+                        import os as _os
+                        _api_base = cfg.get("llm", {}).get("api_base")
+                        _api_key = cfg.get("llm", {}).get("api_key") or _os.getenv("GROQ_API_KEY") or _os.getenv("NVIDIA_NIM_API_KEY")
+                        _kwargs = dict(
                             model=model,
                             messages=messages,
                             tools=tools,
                             tool_choice="auto",
-                            max_tokens=1000,
+                            max_tokens=500,
                             temperature=0.2,
-                            api_base=cfg.get("llm", {}).get("api_base", "https://integrate.api.nvidia.com/v1"),
-                            api_key=cfg.get("llm", {}).get("api_key") or __import__("os").getenv("NVIDIA_NIM_API_KEY"),
+                            api_key=_api_key,
                         )
+                        if _api_base:
+                            _kwargs["api_base"] = _api_base
+                        resp = litellm.completion(**_kwargs)
                         break
                     except Exception as e:
                         if "429" in str(e) and attempt < 3:
@@ -419,7 +424,7 @@ Return ONLY valid JSON."""
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
-    def run_forever(self, off_shift_interval_min: int = 15):
+    def run_forever(self, off_shift_interval_min: int = 60):
         from common.core.event_bus import get_bus
         from common.core.pm_runtime import get_pm_config
 
