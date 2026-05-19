@@ -11,3 +11,8 @@ max_open_positions: 3
 pm_id: '1'
 triage_poll_interval_sec: 5
 weekly_loss_halve_pct: 7.0
+llm:
+  model: openai/moonshotai/kimi-k2.6
+  api_base: https://integrate.api.nvidia.com/v1
+  max_tokens: 2000
+  temperature: 0.1
