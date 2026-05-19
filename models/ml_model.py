@@ -353,11 +353,12 @@ def train():
                     .dropna())
         combined = combined.iloc[:-FORWARD_DAYS]
 
-        # Skip stocks with too few samples or corrupted returns (>50% in 5 days = bad data)
-        if len(combined) < 200:
+        # Skip stocks with insufficient history or corrupted returns
+        # 800 rows ≈ 3.5 years — filters to established liquid stocks only
+        if len(combined) < 800:
             continue
         combined = combined[combined["fwd_pct"].abs() <= 50]
-        if len(combined) < 200:
+        if len(combined) < 800:
             continue
 
         all_X.append(combined.drop(["label", "fwd_pct"], axis=1))
