@@ -356,7 +356,7 @@ def train():
     watchlist = [p.parent.name for p in all_parquets]
     print(f"Building dataset for {len(watchlist)} stocks...")
 
-    all_X, all_y, all_fwd = [], [], []
+    all_X, all_y, all_fwd, all_is_n50 = [], [], [], []
 
     # Load market data once
     market_data = load_market_data("2021-01-01", "2026-12-31")
@@ -383,23 +383,26 @@ def train():
         combined = combined.iloc[:-FORWARD_DAYS]
 
         # Skip stocks with insufficient history or corrupted returns
-        # 800 rows ≈ 3.5 years — filters to established liquid stocks only
         if len(combined) < 800:
             continue
         combined = combined[combined["fwd_pct"].abs() <= 50]
         if len(combined) < 800:
             continue
 
+        is_n50 = symbol.upper() in _NIFTY_50
         all_X.append(combined.drop(["label", "fwd_pct"], axis=1))
         all_y.append(combined["label"])
         all_fwd.append(combined["fwd_pct"])
-        print(f"  {symbol}: {len(combined)} samples, {combined['label'].mean()*100:.1f}% positive")
+        all_is_n50.append(pd.Series([is_n50] * len(combined)))
+        print(f"  {symbol}: {len(combined)} samples, {combined['label'].mean()*100:.1f}% positive {'[N50]' if is_n50 else ''}")
 
     X = pd.concat(all_X).reset_index(drop=True)
     y = pd.concat(all_y).reset_index(drop=True)
     fwd_returns = pd.concat(all_fwd).reset_index(drop=True)
+    is_n50_mask = pd.concat(all_is_n50).reset_index(drop=True)
 
     print(f"\nTotal dataset: {len(X)} samples, {len(X.columns)} features")
+    print(f"  Nifty 50 rows: {is_n50_mask.sum()} | Other: {(~is_n50_mask).sum()}")
     buy_rate = y.mean()
     print(f"Class balance: {buy_rate*100:.1f}% BUY signals")
 
@@ -451,12 +454,18 @@ def train():
                 p_cal = p_cal_candidate
 
         auc = roc_auc_score(y_vl, p_unc)
+        # Also compute AUC restricted to Nifty 50 rows for fair comparison across runs
+        n50_vl = is_n50_mask.iloc[vl_idx]
+        if n50_vl.sum() >= 50:
+            auc_n50 = roc_auc_score(y_vl[n50_vl], p_unc[n50_vl])
+        else:
+            auc_n50 = auc
         brier_u = brier_score_loss(y_vl, p_unc)
         brier_c = brier_score_loss(y_vl, p_cal)
-        auc_scores.append(auc)
+        auc_scores.append(auc_n50)  # use N50 AUC for promotion gate
         brier_uncal_scores.append(brier_u)
         brier_cal_scores.append(brier_c)
-        print(f"  Fold {fold+1}: AUC={auc:.4f} | Brier uncal={brier_u:.4f} cal={brier_c:.4f}")
+        print(f"  Fold {fold+1}: AUC(all)={auc:.4f} AUC(N50)={auc_n50:.4f} | Brier uncal={brier_u:.4f} cal={brier_c:.4f}")
 
     mean_auc = float(np.mean(auc_scores))
     mean_brier_u = float(np.mean(brier_uncal_scores))
