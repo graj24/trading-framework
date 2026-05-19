@@ -43,3 +43,4 @@ plotly==5.22.0
 # Tests
 pytest==8.4.2
 duckdb==1.2.2
+xgboost==2.1.4

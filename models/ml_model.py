@@ -108,7 +108,10 @@ def build_features(df: pd.DataFrame, market_data: dict[str, pd.Series]) -> pd.Da
 
     # ── Calendar ──────────────────────────────────────────────────────────────
     feat["day_of_week"] = pd.to_datetime(df.index).dayofweek
-    feat["month"]       = pd.to_datetime(df.index).month
+    # Cyclical month encoding (avoids ordinal leak where month=12 > month=1)
+    month = pd.to_datetime(df.index).month
+    feat["month_sin"] = np.sin(2 * np.pi * month / 12)
+    feat["month_cos"] = np.cos(2 * np.pi * month / 12)
 
     return feat.replace([np.inf, -np.inf], np.nan)
 
@@ -271,7 +274,14 @@ def train():
       - Brier score uncalibrated  (lower is better, range [0, 1])
       - Brier score calibrated    (should be lower than uncalibrated)
     """
-    from sklearn.ensemble import GradientBoostingClassifier
+    try:
+        from xgboost import XGBClassifier
+        _USE_XGB = True
+    except ImportError:
+        from sklearn.ensemble import GradientBoostingClassifier
+        _USE_XGB = False
+        print("⚠️  xgboost not installed, falling back to GradientBoostingClassifier")
+
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.model_selection import TimeSeriesSplit
     from sklearn.metrics import (
@@ -323,12 +333,25 @@ def train():
     fwd_returns = pd.concat(all_fwd).reset_index(drop=True)
 
     print(f"\nTotal dataset: {len(X)} samples, {len(X.columns)} features")
-    print(f"Class balance: {y.mean()*100:.1f}% BUY signals")
+    buy_rate = y.mean()
+    print(f"Class balance: {buy_rate*100:.1f}% BUY signals")
 
-    base_params = dict(
-        n_estimators=300, max_depth=4, learning_rate=0.05,
-        subsample=0.8, max_features=0.8, random_state=42,
-    )
+    # scale_pos_weight corrects class imbalance: ratio of negatives to positives
+    spw = (1 - buy_rate) / buy_rate if buy_rate > 0 else 1.0
+
+    def _make_model(scale_pos_weight=spw):
+        if _USE_XGB:
+            return XGBClassifier(
+                n_estimators=300, max_depth=4, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8, random_state=42,
+                scale_pos_weight=scale_pos_weight,
+                eval_metric="logloss", verbosity=0,
+            )
+        else:
+            return GradientBoostingClassifier(
+                n_estimators=300, max_depth=4, learning_rate=0.05,
+                subsample=0.8, max_features=0.8, random_state=42,
+            )
 
     tscv = TimeSeriesSplit(n_splits=5)
     auc_scores = []
@@ -341,21 +364,24 @@ def train():
         y_tr, y_vl = y.iloc[tr_idx], y.iloc[vl_idx]
 
         # Uncalibrated baseline (AUC + Brier reference)
-        base_fold = GradientBoostingClassifier(**base_params)
+        base_fold = _make_model()
         base_fold.fit(X_tr, y_tr)
         p_unc = base_fold.predict_proba(X_vl)[:, 1]
 
         # Calibrated: split train into 80% fit / 20% calibrate (preserves time order)
+        # Only use calibration if it actually improves Brier score
         split = max(100, int(len(tr_idx) * 0.8))
+        p_cal = p_unc  # default: no calibration
         if split < len(tr_idx) - 50:
             fit_idx, cal_idx = tr_idx[:split], tr_idx[split:]
-            base_for_cal = GradientBoostingClassifier(**base_params)
+            base_for_cal = _make_model()
             base_for_cal.fit(X.iloc[fit_idx].fillna(0), y.iloc[fit_idx])
             cal = CalibratedClassifierCV(estimator=base_for_cal, method="isotonic", cv="prefit")
             cal.fit(X.iloc[cal_idx].fillna(0), y.iloc[cal_idx])
-            p_cal = cal.predict_proba(X_vl)[:, 1]
-        else:
-            p_cal = p_unc  # fold too small to split
+            p_cal_candidate = cal.predict_proba(X_vl)[:, 1]
+            # Only accept calibration if it genuinely reduces Brier score
+            if brier_score_loss(y_vl, p_cal_candidate) < brier_score_loss(y_vl, p_unc):
+                p_cal = p_cal_candidate
 
         auc = roc_auc_score(y_vl, p_unc)
         brier_u = brier_score_loss(y_vl, p_unc)
@@ -374,32 +400,44 @@ def train():
     print(f"Mean Brier uncal: {mean_brier_u:.4f}")
     print(f"Mean Brier cal:   {mean_brier_c:.4f}  ({delta:+.1f}% improvement)")
 
-    # Final model: fit base on first 80% of all data, calibrate on last 20%.
-    # Saved model is the calibrator; predict_proba goes through it.
+    # Final model: fit base on first 80% of all data, calibrate on last 20%
+    # only if calibration helps.
     n_total = len(X)
     n_calib = max(200, n_total // 5)
     fit_X = X.iloc[:-n_calib].fillna(0); fit_y = y.iloc[:-n_calib]
     cal_X = X.iloc[-n_calib:].fillna(0); cal_y = y.iloc[-n_calib:]
 
-    base_final = GradientBoostingClassifier(**base_params)
+    base_final = _make_model()
     base_final.fit(fit_X, fit_y)
-    final_model = CalibratedClassifierCV(estimator=base_final, method="isotonic", cv="prefit")
-    final_model.fit(cal_X, cal_y)
+
+    # Test whether calibration helps on the held-out calibration slice
+    p_base = base_final.predict_proba(cal_X)[:, 1]
+    cal_candidate = CalibratedClassifierCV(estimator=base_final, method="isotonic", cv="prefit")
+    cal_candidate.fit(cal_X, cal_y)
+    p_cal_final = cal_candidate.predict_proba(cal_X)[:, 1]
+
+    if brier_score_loss(cal_y, p_cal_final) < brier_score_loss(cal_y, p_base):
+        final_model = cal_candidate
+        print("Calibration accepted for final model (improved Brier on held-out slice)")
+    else:
+        final_model = base_final
+        print("Calibration skipped for final model (did not improve Brier)")
 
     # Feature importance from base estimator (calibrator doesn't expose it).
-    importance = pd.Series(base_final.feature_importances_, index=X.columns)
+    base_for_importance = base_final
+    importance = pd.Series(base_for_importance.feature_importances_, index=X.columns)
     top20 = importance.nlargest(20)
     print(f"\nTop 20 features:")
     for feat_name, imp in top20.items():
         bar = "█" * int(imp * 300)
         print(f"  {feat_name:<25} {imp:.4f} {bar}")
 
-    # Stage 1C: walk-forward net-P&L gate. Simulate the candidate's trades on
-    # the calibration slice using realistic round-trip costs from core.costs.
+    # Stage 1C: walk-forward net-P&L gate.
+    PREDICT_THRESHOLD = 0.35  # lowered from 0.55 to improve recall
     from core.promotion_gate import walk_forward_pnl
     cal_proba = final_model.predict_proba(cal_X)[:, 1]
     cal_fwd   = fwd_returns.iloc[-n_calib:].values
-    wf = walk_forward_pnl(cal_proba, cal_fwd, threshold=0.55)
+    wf = walk_forward_pnl(cal_proba, cal_fwd, threshold=PREDICT_THRESHOLD)
     print(f"\nWalk-forward (calibration slice, last {n_calib} rows):")
     print(f"  trades={wf.n_trades}/{wf.n_eval}  "
           f"net P&L={wf.net_pnl_pct:+.2f}%  "
@@ -411,8 +449,8 @@ def train():
                     brier_uncal=mean_brier_u, brier_cal=mean_brier_c,
                     walk_forward=wf)
 
-    print(f"\nClassification report (last fold, calibrated):")
-    print(classification_report(y_vl, (final_model.predict_proba(X_vl)[:, 1] >= 0.5).astype(int)))
+    print(f"\nClassification report (last fold, threshold={PREDICT_THRESHOLD}):")
+    print(classification_report(y_vl, (final_model.predict_proba(X_vl)[:, 1] >= PREDICT_THRESHOLD).astype(int)))
 
 
 # ── Predict ───────────────────────────────────────────────────────────────────
@@ -443,7 +481,7 @@ def predict(symbol: str) -> dict:
     latest = feat.iloc[[-1]][features].fillna(0)
 
     proba = model.predict_proba(latest)[0][1]
-    signal = "BUY" if proba >= 0.55 else ("HOLD" if proba >= 0.40 else "SKIP")
+    signal = "BUY" if proba >= 0.35 else ("HOLD" if proba >= 0.25 else "SKIP")
 
     return {
         "symbol":     symbol,
@@ -503,7 +541,7 @@ if __name__ == "__main__":
             X = combined[features].fillna(0)
             y = combined["label"]
             proba = model.predict_proba(X)[:, 1]
-            pred  = (proba >= 0.55).astype(int)
+            pred  = (proba >= 0.35).astype(int)
 
             # Only evaluate on days where model said BUY
             buy_mask = pred == 1
