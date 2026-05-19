@@ -181,7 +181,11 @@ def load_market_data(start: str, end: str) -> dict[str, pd.Series]:
         combined = pd.concat(all_closes, axis=1).sort_index()
         # NIFTY proxy: equal-weight normalised price (base=100 at first row)
         normed = combined / combined.iloc[0] * 100
-        market["nifty"] = normed.mean(axis=1)
+        nifty_proxy = normed.mean(axis=1)
+        market["nifty"] = nifty_proxy
+
+        # VIX proxy: 20-day realized volatility of NIFTY proxy (annualised)
+        market["vix"] = nifty_proxy.pct_change().rolling(20).std() * (252 ** 0.5) * 100
 
         # Sector proxies
         for sector, members in _SECTOR_STOCKS.items():
