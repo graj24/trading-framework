@@ -148,7 +148,7 @@ EFFICIENCY RULES:
 3. If unsure, return DO_NOTHING with a clear reasoning. Better than hitting the tool call limit.
 4. Only do EVOLVE/PIVOT if you have specific evidence — otherwise stay in your current strategy.
 
-When done, return a JSON object as your final message:
+When done, return ONLY a JSON object as your final message (no prose, no explanation outside the JSON):
 {{
   "action": "DO_NOTHING|RESEARCH|TRADE|EVOLVE|PIVOT",
   "reasoning": "one sentence",
@@ -159,7 +159,8 @@ When done, return a JSON object as your final message:
     // PIVOT:   {{"new_direction": "brief description"}}
     // DO_NOTHING: {{}}
   }}
-}}"""
+}}
+IMPORTANT: Your final message must be valid JSON only. Do not include any text before or after the JSON."""
 
     # ── Tool-calling decision loop ─────────────────────────────────────────────
 
@@ -264,7 +265,16 @@ When done, return a JSON object as your final message:
                     logger.info(f"PM{self.pm_id} used {tool_calls_made} tools this cycle")
                     return result
                 except json.JSONDecodeError:
-                    # LLM returned prose instead of JSON — treat as DO_NOTHING
+                    # Try to extract JSON block from prose (Kimi K2.6 reasoning model)
+                    import re as _re
+                    json_match = _re.search(r'\{[^{}]*"action"[^{}]*\}', raw, _re.DOTALL)
+                    if json_match:
+                        try:
+                            result = json.loads(json_match.group())
+                            if result.get("action") in ACTIONS:
+                                return result
+                        except Exception:
+                            pass
                     logger.warning(f"PM{self.pm_id} non-JSON response: {raw[:100]}")
                     return {"action": "DO_NOTHING", "reasoning": raw[:200]}
 
