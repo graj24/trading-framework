@@ -6,7 +6,7 @@ data:
   - 15m
   - 5m
 llm:
-  model: groq/llama-3.3-70b-versatile
+  model: azure_ai/Kimi-K2.6
   max_tokens: 500
   temperature: 0.1
 logging:

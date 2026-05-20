@@ -12,6 +12,6 @@ pm_id: '1'
 triage_poll_interval_sec: 5
 weekly_loss_halve_pct: 7.0
 llm:
-  model: groq/llama-3.3-70b-versatile
+  model: azure_ai/Kimi-K2.6
   max_tokens: 500
   temperature: 0.1
