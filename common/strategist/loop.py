@@ -242,9 +242,18 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
                 if not raw:
                     raw = (getattr(msg, "reasoning_content", None) or "").strip()
 
+                # Strip Kimi K2.6 raw tool call tokens if present
+                if "<|tool_call" in raw:
+                    raw = ""
+
                 # Nudge model to decide if approaching limit
                 if not raw and tool_calls_made >= MAX_TOOL_CALLS - 2:
                     messages.append({"role": "user", "content": "You have used many tools. Make your final decision now as JSON only."})
+                    continue
+
+                # If still empty after stripping, nudge
+                if not raw:
+                    messages.append({"role": "user", "content": "Respond with ONLY a JSON object: {\"action\":\"TRADE\",\"reasoning\":\"...\",\"details\":{\"symbol\":\"X\",\"direction\":\"BUY\",\"qty\":1,\"sl\":0,\"tag\":\"pm1_x\"}}"})
                     continue
 
                 # Groq/llama sometimes wraps the final answer as a tool call
