@@ -112,7 +112,7 @@ EARNINGS BEAT AVG REACTION: {rag.get('earnings_beat_avg', 'N/A')}%"""
         import os as _os
         _model = llm_cfg.get("model", "groq/llama-3.3-70b-versatile")
         _api_base = llm_cfg.get("api_base")  # None for Groq (litellm handles it)
-        _api_key = llm_cfg.get("api_key") or _os.getenv("GROQ_API_KEY") or _os.getenv("NVIDIA_NIM_API_KEY")
+        _api_key = llm_cfg.get("api_key") or _os.getenv("AGENTROUTER_API_KEY") or _os.getenv("GROQ_API_KEY") or _os.getenv("NVIDIA_NIM_API_KEY")
         _kwargs = dict(model=_model, messages=messages,
                        temperature=llm_cfg.get("temperature", 0.1), max_tokens=200,
                        api_key=_api_key)

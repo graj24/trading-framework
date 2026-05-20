@@ -185,7 +185,7 @@ When done, return a JSON object as your final message:
                     try:
                         import os as _os
                         _api_base = cfg.get("llm", {}).get("api_base")
-                        _api_key = cfg.get("llm", {}).get("api_key") or _os.getenv("GROQ_API_KEY") or _os.getenv("NVIDIA_NIM_API_KEY")
+                        _api_key = cfg.get("llm", {}).get("api_key") or _os.getenv("AGENTROUTER_API_KEY") or _os.getenv("GROQ_API_KEY") or _os.getenv("NVIDIA_NIM_API_KEY")
                         _kwargs = dict(
                             model=model,
                             messages=messages,
