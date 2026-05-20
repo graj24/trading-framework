@@ -230,7 +230,10 @@ When done, return a JSON object as your final message:
                     continue
 
                 # No tool calls — expect final JSON decision
+                # Kimi K2.6 is a reasoning model: answer may be in reasoning_content
                 raw = (msg.content or "").strip()
+                if not raw:
+                    raw = (getattr(msg, "reasoning_content", None) or "").strip()
 
                 # Groq/llama sometimes wraps the final answer as a tool call
                 # e.g. <function=DO_NOTHING>{"action":...}</function>
