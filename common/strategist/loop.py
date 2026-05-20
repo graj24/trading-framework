@@ -182,6 +182,8 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
 
             while tool_calls_made < MAX_TOOL_CALLS:
                 # Retry with backoff on 429
+                # Keep only system prompt + last 6 messages to avoid request size limits
+                trimmed = messages[:1] + messages[-6:] if len(messages) > 7 else messages
                 for attempt in range(4):
                     try:
                         import os as _os
@@ -189,7 +191,7 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
                         _api_key = cfg.get("llm", {}).get("api_key") or _os.getenv("AZURE_AI_API_KEY") or _os.getenv("AGENTROUTER_API_KEY") or _os.getenv("GROQ_API_KEY") or _os.getenv("NVIDIA_NIM_API_KEY")
                         _kwargs = dict(
                             model=model,
-                            messages=messages,
+                            messages=trimmed,
                             tools=tools,
                             tool_choice="auto",
                             max_tokens=500,
