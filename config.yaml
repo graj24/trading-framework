@@ -6,7 +6,7 @@ data:
   - 15m
   - 5m
 llm:
-  model: openai/Llama-3.3-70B-Instruct
+  model: openai/DeepSeek-V4-Flash
   api_base: https://trd-frm-resource.services.ai.azure.com/models
   max_tokens: 500
   temperature: 0.1
