@@ -12,7 +12,7 @@ pm_id: '2'
 triage_poll_interval_sec: 5
 weekly_loss_halve_pct: 7.0
 llm:
-  model: openai/Kimi-K2.6
+  model: openai/Llama-3.3-70B-Instruct
   api_base: https://trd-frm-resource.services.ai.azure.com/openai/v1
   max_tokens: 500
   temperature: 0.1
