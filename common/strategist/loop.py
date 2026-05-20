@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 ACTIONS = ("DO_NOTHING", "RESEARCH", "TRADE", "EVOLVE", "PIVOT")
 
 # Max tool calls per cycle (prevents runaway loops)
-MAX_TOOL_CALLS = 10
+MAX_TOOL_CALLS = 15
 
 
 class Strategist:
