@@ -284,6 +284,30 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
                                 return result
                         except Exception:
                             pass
+                    # Ask Kimi to convert its reasoning to JSON
+                    try:
+                        import os as _os
+                        _api_base = cfg.get("llm", {}).get("api_base")
+                        _api_key = cfg.get("llm", {}).get("api_key") or _os.getenv("AZURE_AI_API_KEY") or _os.getenv("GROQ_API_KEY")
+                        _convert_kwargs = dict(
+                            model=model,
+                            messages=[
+                                {"role": "user", "content": f"Based on this analysis:\n{raw[:500]}\n\nOutput ONLY valid JSON in this exact format, nothing else:\n{{\"action\":\"TRADE|DO_NOTHING|RESEARCH\",\"reasoning\":\"one sentence\",\"details\":{{}}}}"}
+                            ],
+                            tool_choice="none",
+                            max_tokens=200,
+                            temperature=0.1,
+                            api_key=_api_key,
+                        )
+                        if _api_base:
+                            _convert_kwargs["api_base"] = _api_base
+                        _r = litellm.completion(**_convert_kwargs)
+                        _raw2 = (_r.choices[0].message.content or getattr(_r.choices[0].message, "reasoning_content", "") or "").strip()
+                        result = json.loads(_raw2)
+                        if result.get("action") in ACTIONS:
+                            return result
+                    except Exception:
+                        pass
                     logger.warning(f"PM{self.pm_id} non-JSON response: {raw[:100]}")
                     return {"action": "DO_NOTHING", "reasoning": raw[:200]}
 
