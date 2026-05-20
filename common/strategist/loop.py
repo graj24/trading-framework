@@ -194,12 +194,14 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
                         _kwargs = dict(
                             model=model,
                             messages=trimmed,
-                            tools=tools,
-                            tool_choice="none" if force_decide else "auto",
                             max_tokens=500,
                             temperature=0.2,
                             api_key=_api_key,
                         )
+                        # Only provide tools in the first half; force plain text in second half
+                        if not force_decide:
+                            _kwargs["tools"] = tools
+                            _kwargs["tool_choice"] = "auto"
                         if _api_base:
                             _kwargs["api_base"] = _api_base
                         resp = litellm.completion(**_kwargs)
