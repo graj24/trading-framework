@@ -7,7 +7,7 @@ data:
   - 5m
 llm:
   model: openai/Llama-3.3-70B-Instruct
-  api_base: https://trd-frm-resource.services.ai.azure.com/openai/v1
+  api_base: https://trd-frm-resource.services.ai.azure.com/models
   max_tokens: 500
   temperature: 0.1
 logging:
