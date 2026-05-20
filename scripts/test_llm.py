@@ -7,7 +7,7 @@ load_dotenv()
 import litellm
 
 key = os.getenv('AZURE_AI_API_KEY', '')
-base = 'https://trd-frm-resource.services.ai.azure.com/models'
+base = 'https://trd-frm-resource.services.ai.azure.com/openai/v1'
 print(f"AZURE_AI_API_KEY set: {'yes' if key else 'NO'}")
 
 for pm, model in [('PM1', 'openai/Kimi-K2.6'), ('PM2', 'openai/Kimi-K2.6')]:
