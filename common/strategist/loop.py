@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 ACTIONS = ("DO_NOTHING", "RESEARCH", "TRADE", "EVOLVE", "PIVOT")
 
 # Max tool calls per cycle (prevents runaway loops)
-MAX_TOOL_CALLS = 25
+MAX_TOOL_CALLS = 10
 
 
 class Strategist:
@@ -237,6 +237,11 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
                 raw = (msg.content or "").strip()
                 if not raw:
                     raw = (getattr(msg, "reasoning_content", None) or "").strip()
+
+                # Nudge model to decide if approaching limit
+                if not raw and tool_calls_made >= MAX_TOOL_CALLS - 2:
+                    messages.append({"role": "user", "content": "You have used many tools. Make your final decision now as JSON only."})
+                    continue
 
                 # Groq/llama sometimes wraps the final answer as a tool call
                 # e.g. <function=DO_NOTHING>{"action":...}</function>
