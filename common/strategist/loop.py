@@ -124,6 +124,9 @@ TRIGGER: {trigger}
 TIME: {datetime.now(IST).strftime('%Y-%m-%d %H:%M IST')}
 
 CURRENT STRATEGY: {strategy_name} (v{state['active_version']})
+STRATEGY RULES:
+{json.dumps(state['active_strategy'], indent=2)[:800] if state['active_strategy'] else 'None defined'}
+
 WATCHLIST: {watchlist}
 OPEN POSITIONS: {positions_str}
 RECENT INBOX EVENTS: {inbox_str}
@@ -132,11 +135,12 @@ LEADERBOARD:
 {rival_str}
 
 YOUR PLAN:
-{state['plan'][:1000]}
+{state['plan'][:500]}
 
 RECENT JOURNAL:
-{state['journal_tail'][-500:]}
+{state['journal_tail'][-300:]}
 {cold_start}
+ACTION REQUIRED: Call get_prices for your watchlist, check which stocks meet your strategy entry rules, and TRADE if any qualify. If none qualify, return DO_NOTHING with specific reasoning about current prices vs your rules.
 You can call tools (read_file, write_file, run_shell, run_pytest, web_fetch, web_search,
 sql_query, get_prices, memory_store, memory_search) as many times as needed before deciding.
 RULE: Before forming any entry/exit price hypothesis, call get_prices() to get real current prices.
