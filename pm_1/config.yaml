@@ -12,7 +12,6 @@ pm_id: '1'
 triage_poll_interval_sec: 5
 weekly_loss_halve_pct: 7.0
 llm:
-  model: openai/moonshotai/kimi-k2.6
-  api_base: https://agentrouter.org/
+  model: groq/llama-3.3-70b-versatile
   max_tokens: 500
   temperature: 0.1

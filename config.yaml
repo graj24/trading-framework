@@ -6,8 +6,7 @@ data:
   - 15m
   - 5m
 llm:
-  model: openai/moonshotai/kimi-k2.6
-  api_base: https://agentrouter.org/
+  model: groq/llama-3.3-70b-versatile
   max_tokens: 500
   temperature: 0.1
 logging:
