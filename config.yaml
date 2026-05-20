@@ -6,7 +6,8 @@ data:
   - 15m
   - 5m
 llm:
-  model: azure_ai/Kimi-K2.6
+  model: openai/Kimi-K2.6
+  api_base: https://trd-frm-resource.services.ai.azure.com/models
   max_tokens: 500
   temperature: 0.1
 logging:
