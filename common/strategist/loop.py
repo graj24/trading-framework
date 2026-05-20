@@ -184,6 +184,8 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
                 # Retry with backoff on 429
                 # Keep only system prompt + last 6 messages to avoid request size limits
                 trimmed = messages[:1] + messages[-6:] if len(messages) > 7 else messages
+                # Force no-tool final decision once halfway through budget
+                force_decide = tool_calls_made >= MAX_TOOL_CALLS // 2
                 for attempt in range(4):
                     try:
                         import os as _os
@@ -193,7 +195,7 @@ IMPORTANT: Your final message must be valid JSON only. Do not include any text b
                             model=model,
                             messages=trimmed,
                             tools=tools,
-                            tool_choice="auto",
+                            tool_choice="none" if force_decide else "auto",
                             max_tokens=500,
                             temperature=0.2,
                             api_key=_api_key,
