@@ -22,7 +22,7 @@ help:
 	@echo "  ci-local           lint + typecheck + test"
 	@echo "  precommit-install  install pre-commit hooks"
 	@echo "  precommit          run pre-commit on all files"
-	@echo "  up/down/logs       (TODO: K1 Step 1.2)"
+	@echo "  up/down/logs       docker compose stack (postgres, temporal, qdrant, letta)"
 	@echo "  health             (TODO: K1 Step 1.4)"
 	@echo "  db-migrate/db-shell (TODO: K1 Step 1.3)"
 	@echo "  api                (TODO: K1 Step 1.4)"
@@ -60,13 +60,15 @@ precommit:
 	uv run pre-commit run --all-files
 
 up:
-	@echo "TODO: K1 Step 1.2 — docker compose up"; exit 1
+	docker compose -f infra/docker-compose.yml up -d
+	@echo "Waiting for services to register..."
+	@docker compose -f infra/docker-compose.yml ps
 
 down:
-	@echo "TODO: K1 Step 1.2 — docker compose down"; exit 1
+	docker compose -f infra/docker-compose.yml down
 
 logs:
-	@echo "TODO: K1 Step 1.2 — docker compose logs -f"; exit 1
+	docker compose -f infra/docker-compose.yml logs -f
 
 health:
 	@echo "TODO: K1 Step 1.4 — curl /api/health"; exit 1
