@@ -39,7 +39,7 @@ def stub_lifespan_resources(monkeypatch: pytest.MonkeyPatch) -> None:
         return _SENTINEL_POOL
 
     async def fake_temporal(settings: Settings) -> object:
-        return object()
+        return _FakeTemporalClient()
 
     def fake_langfuse(settings: Settings) -> None:
         return None
@@ -54,6 +54,37 @@ def stub_lifespan_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(state_module, "_build_temporal_client", fake_temporal)
     monkeypatch.setattr(state_module, "_build_langfuse", fake_langfuse)
     monkeypatch.setattr(state_module, "teardown_app_state", fake_teardown)
+
+
+class _FakeTemporalClient:
+    """Records start_workflow invocations without touching a real cluster.
+
+    The endpoint only awaits ``start_workflow`` and never inspects the
+    return value, so we return ``None`` and stash the call args for any
+    test that wants to assert on them.
+    """
+
+    def __init__(self) -> None:
+        self.started: list[dict[str, Any]] = []
+
+    async def start_workflow(
+        self,
+        workflow_fn: Any,
+        *args: Any,
+        id: str,
+        task_queue: str,
+        **kwargs: Any,
+    ) -> None:
+        self.started.append(
+            {
+                "workflow": workflow_fn,
+                "args": args,
+                "id": id,
+                "task_queue": task_queue,
+                "kwargs": kwargs,
+            }
+        )
+        return None
 
 
 @pytest.fixture
@@ -75,6 +106,7 @@ def _stub_repo(
     calls: dict[str, list[Any]] = {
         "insert": [],
         "update_status": [],
+        "update_workflow_id": [],
         "exists": [],
         "get": [],
         "list": [],
@@ -92,6 +124,9 @@ def _stub_repo(
     async def fake_update_status(pool: Any, pm_id: str, status: str) -> None:
         calls["update_status"].append((pm_id, status))
 
+    async def fake_update_workflow_id(pool: Any, pm_id: str, workflow_id: str | None) -> None:
+        calls["update_workflow_id"].append((pm_id, workflow_id))
+
     async def fake_get_pm(pool: Any, pm_id: str) -> pm_repo_module.PMRecord | None:
         calls["get"].append(pm_id)
         return get_record
@@ -103,6 +138,7 @@ def _stub_repo(
     monkeypatch.setattr(pm_repo_module, "pm_exists", fake_pm_exists)
     monkeypatch.setattr(pm_repo_module, "insert_pm", fake_insert_pm)
     monkeypatch.setattr(pm_repo_module, "update_pm_status", fake_update_status)
+    monkeypatch.setattr(pm_repo_module, "update_pm_workflow_id", fake_update_workflow_id)
     monkeypatch.setattr(pm_repo_module, "get_pm", fake_get_pm)
     monkeypatch.setattr(pm_repo_module, "list_pms", fake_list_pms)
     return calls
@@ -154,7 +190,7 @@ def test_spawn_creates_pm_and_workspace(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["pm_id"] == "pm1"
-    assert body["workflow_id"] is None
+    assert body["workflow_id"] == "pm-pm1"
     assert body["status"] == "spawned"
     workspace = Path(body["workspace_path"])
     assert workspace.is_dir()
@@ -166,13 +202,14 @@ def test_spawn_creates_pm_and_workspace(
         assert (workspace / sub).is_dir()
     assert (workspace / "config.yaml").is_file()
 
-    # DB call ordering: exists check, insert, update to spawned.
+    # DB call ordering: exists check, insert, update to spawned, update workflow_id.
     assert calls["exists"] == ["pm1"]
     assert len(calls["insert"]) == 1
     assert calls["insert"][0]["pm_id"] == "pm1"
     assert calls["insert"][0]["name"] == "PM1"
     assert calls["insert"][0]["prompt_path"] == "/dev/null"
     assert calls["update_status"] == [("pm1", "spawned")]
+    assert calls["update_workflow_id"] == [("pm1", "pm-pm1")]
 
 
 def test_spawn_normalizes_pm_id(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,3 +300,76 @@ def test_503_when_pool_is_none_for_db_endpoints(
     assert r_get.status_code == 503
     assert r_spawn.status_code == 503
     assert r_mode.status_code == 503
+
+
+def test_spawn_503_when_temporal_client_unavailable(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spawn returns 503 when Temporal was unreachable at app startup."""
+
+    async def no_temporal(settings: Settings) -> None:
+        return None
+
+    monkeypatch.setattr(state_module, "_build_temporal_client", no_temporal)
+    fastapi_app = app_module.create_app(settings)
+    with TestClient(fastapi_app) as c:
+        r = c.post(
+            "/api/pms/spawn",
+            json={"name": "PM1", "starting_capital_inr": 100.0},
+        )
+    assert r.status_code == 503
+    assert "temporal" in r.json()["detail"].lower()
+
+
+def test_spawn_starts_workflow_with_correct_args(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spawn endpoint must hand the right config to start_workflow."""
+    from agora.platform.workers.pm_supervisor import PMConfig, PMSupervisor
+
+    _stub_repo(monkeypatch, exists=False)
+    # Reach into the started TestClient's app.state to inspect the fake.
+    r = client.post(
+        "/api/pms/spawn",
+        json={"name": "PM1", "starting_capital_inr": 1_000_000.0},
+    )
+    assert r.status_code == 200, r.text
+
+    fake = client.app.state.agora.temporal_client  # type: ignore[attr-defined]
+    assert isinstance(fake, _FakeTemporalClient)
+    assert len(fake.started) == 1
+    started = fake.started[0]
+    assert started["workflow"] is PMSupervisor.run
+    assert started["id"] == "pm-pm1"
+    assert started["task_queue"] == "agora"
+    # Single positional arg: the PMConfig dataclass.
+    (config,) = started["args"]
+    assert isinstance(config, PMConfig)
+    assert config.pm_id == "pm1"
+    assert config.name == "PM1"
+    assert config.starting_capital_inr == 1_000_000.0
+
+
+def test_spawn_marks_error_when_start_workflow_raises(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If start_workflow blows up, the PM is marked 'error' and 500 returned."""
+    calls = _stub_repo(monkeypatch, exists=False)
+
+    async def boom(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("temporal exploded")
+
+    # Patch the fake client's start_workflow on the live app instance.
+    client.app.state.agora.temporal_client.start_workflow = boom  # type: ignore[attr-defined]
+
+    r = client.post(
+        "/api/pms/spawn",
+        json={"name": "PM1", "starting_capital_inr": 1_000_000.0},
+    )
+    assert r.status_code == 500
+    # spawned -> then error after start_workflow blew up.
+    assert calls["update_status"] == [("pm1", "spawned"), ("pm1", "error")]
+    # workflow_id should NOT have been persisted since start_workflow failed.
+    assert calls["update_workflow_id"] == []

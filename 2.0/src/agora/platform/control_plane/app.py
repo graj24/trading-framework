@@ -82,8 +82,10 @@ class SpawnPMRequest(BaseModel):
 class SpawnPMResponse(BaseModel):
     """Body of the spawn endpoint response.
 
-    ``workflow_id`` is null in K2 Step 2.1 — the PMSupervisor workflow
-    is started in Step 2.2, which will populate this field on response.
+    ``workflow_id`` is the Temporal workflow id (``pm-<pm_id>``) of the
+    just-started PMSupervisor workflow. The workflow itself flips the
+    PM's status from ``spawned`` to ``running`` via ``mark_pm_running``
+    on its first iteration.
     """
 
     pm_id: str
@@ -171,6 +173,14 @@ def _build_router(settings: Settings) -> APIRouter:
         state = _get_state(request)
         if state.postgres_pool is None:
             raise HTTPException(status_code=503, detail="postgres unavailable")
+        if state.temporal_client is None:
+            # Fail fast: spawning without Temporal would leave a PM row
+            # whose workflow we can never start. The operator can retry
+            # once Temporal is reachable.
+            raise HTTPException(
+                status_code=503,
+                detail="temporal unavailable; PM cannot be spawned",
+            )
 
         # Validate name + derive pm_id. Pydantic gave us type/range checks;
         # the regex is the alphabet rule from plan §4 Step 2.1.
@@ -232,13 +242,57 @@ def _build_router(settings: Settings) -> APIRouter:
                 detail=f"failed to provision workspace: {type(e).__name__}",
             ) from e
 
-        # 3) Mark the row 'spawned'. K2 Step 2.2 will start the Temporal
-        # workflow and flip this to 'running'.
+        # 3) Mark the row 'spawned'. The Temporal workflow start below
+        # will flip it to 'running' on its own through mark_pm_running.
         await pm_repo.update_pm_status(state.postgres_pool, pm_id, "spawned")
+
+        # 4) Start the PMSupervisor workflow. The workflow id is the
+        # canonical handle the API uses for stop/pause/resume signals
+        # in Step 2.3. On failure we mark the PM 'error' so the
+        # dashboard surfaces it; the row stays so a retry is a clean
+        # 409 (operator decides whether to delete it).
+        from agora.platform.workers.pm_supervisor import PMConfig, PMSupervisor
+
+        workflow_id = f"pm-{pm_id}"
+        wf_config = PMConfig(
+            pm_id=pm_id,
+            name=name,
+            starting_capital_inr=req.starting_capital_inr,
+        )
+        try:
+            await state.temporal_client.start_workflow(
+                PMSupervisor.run,
+                wf_config,
+                id=workflow_id,
+                task_queue="agora",
+            )
+        except Exception as e:
+            logger.exception("spawn_pm: start_workflow failed for {}: {}", pm_id, e)
+            try:
+                await pm_repo.update_pm_status(state.postgres_pool, pm_id, "error")
+            except Exception as inner:
+                logger.warning("spawn_pm: also failed to mark {} as error: {}", pm_id, inner)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to start workflow: {type(e).__name__}",
+            ) from e
+
+        # Persist the workflow id so /api/pms/{id} reflects it. If this
+        # write fails (vanishingly unlikely — same pool we just used),
+        # the workflow is still running; we surface 500 so the operator
+        # knows to reconcile.
+        try:
+            await pm_repo.update_pm_workflow_id(state.postgres_pool, pm_id, workflow_id)
+        except Exception as e:
+            logger.exception("spawn_pm: update_pm_workflow_id failed for {}: {}", pm_id, e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to persist workflow_id: {type(e).__name__}",
+            ) from e
 
         return SpawnPMResponse(
             pm_id=pm_id,
-            workflow_id=None,
+            workflow_id=workflow_id,
             status="spawned",
             workspace_path=str(workspace_path),
         )
