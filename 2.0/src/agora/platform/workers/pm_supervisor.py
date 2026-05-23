@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import activity, workflow
+from temporalio.common import RetryPolicy
 
 # ---------------------------------------------------------------- payloads
 # Plain dataclasses cross the workflow/activity boundary as JSON. Keep them
@@ -276,7 +277,19 @@ class PMSupervisor:
                 await workflow.execute_activity(
                     heartbeat_journal,
                     HeartbeatInput(pm_id=config.pm_id, mode=mode),
-                    start_to_close_timeout=timedelta(seconds=10),
+                    # Bumped from 10s: the activity does a file write +
+                    # an HTTP POST + (best-effort) DB writes. 10s gave
+                    # only 3-4x headroom; a transient API slowdown
+                    # could trip it. 30s gives ~10x.
+                    start_to_close_timeout=timedelta(seconds=30),
+                    # Heartbeats are best-effort signals, not guaranteed
+                    # delivery. Temporal's default retry policy would
+                    # re-run a slow tick and produce duplicate journal
+                    # lines (the activity uses ``open("a")`` — append-
+                    # only, no idempotency key). The next cycle's
+                    # heartbeat (one cadence period later) is the right
+                    # way to recover from a missed tick.
+                    retry_policy=RetryPolicy(maximum_attempts=1),
                 )
 
                 # Mode-aware cadence. Both default to 60s in K2 (per plan
