@@ -6,7 +6,7 @@
 .PHONY: help install lint fmt typecheck test test-cov ci-local \
         precommit-install precommit \
         up down logs health \
-        db-migrate db-shell \
+        db-migrate db-downgrade db-shell \
         api worker dashboard smoke-llm \
         clean
 
@@ -24,7 +24,9 @@ help:
 	@echo "  precommit          run pre-commit on all files"
 	@echo "  up/down/logs       docker compose stack (postgres, temporal, qdrant, letta)"
 	@echo "  health             (TODO: K1 Step 1.4)"
-	@echo "  db-migrate/db-shell (TODO: K1 Step 1.3)"
+	@echo "  db-migrate         alembic upgrade head"
+	@echo "  db-downgrade       alembic downgrade -1"
+	@echo "  db-shell           psql into the agora DB inside the container"
 	@echo "  api                (TODO: K1 Step 1.4)"
 	@echo "  worker             (TODO: K1 Step 1.6)"
 	@echo "  dashboard          (TODO: K1 Step 1.8)"
@@ -74,10 +76,16 @@ health:
 	@echo "TODO: K1 Step 1.4 — curl /api/health"; exit 1
 
 db-migrate:
-	@echo "TODO: K1 Step 1.3 — alembic upgrade head"; exit 1
+	POSTGRES_URL=$${POSTGRES_URL:-postgresql+asyncpg://agora:agora@localhost:5432/agora} \
+		uv run alembic upgrade head
+
+db-downgrade:
+	POSTGRES_URL=$${POSTGRES_URL:-postgresql+asyncpg://agora:agora@localhost:5432/agora} \
+		uv run alembic downgrade -1
 
 db-shell:
-	@echo "TODO: K1 Step 1.3 — psql into agora db"; exit 1
+	# psql does not understand +asyncpg; use a plain Postgres URL.
+	docker exec -it agora-postgres psql -U agora -d agora
 
 api:
 	@echo "TODO: K1 Step 1.4 — uvicorn agora.platform.control_plane.app:app"; exit 1

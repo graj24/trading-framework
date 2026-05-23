@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]==0.34.0",
     "httpx>=0.28,<0.29",
     "asyncpg>=0.30,<0.31",
+    "psycopg[binary]>=3.2,<4",
     "sqlalchemy[asyncio]>=2.0.36,<3",
     "alembic>=1.14,<2",
     "temporalio==1.9.0",
@@ -71,6 +72,9 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-q"
+markers = [
+    "slow: marks tests as slow (use -m 'not slow' to skip)",
+]
 
 [tool.coverage.run]
 source = ["src/agora"]
