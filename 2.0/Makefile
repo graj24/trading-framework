@@ -23,11 +23,11 @@ help:
 	@echo "  precommit-install  install pre-commit hooks"
 	@echo "  precommit          run pre-commit on all files"
 	@echo "  up/down/logs       docker compose stack (postgres, temporal, qdrant, letta)"
-	@echo "  health             (TODO: K1 Step 1.4)"
+	@echo "  health             curl /api/health (uses jq if available)"
 	@echo "  db-migrate         alembic upgrade head"
 	@echo "  db-downgrade       alembic downgrade -1"
 	@echo "  db-shell           psql into the agora DB inside the container"
-	@echo "  api                (TODO: K1 Step 1.4)"
+	@echo "  api                uvicorn (factory mode) on :8000"
 	@echo "  worker             (TODO: K1 Step 1.6)"
 	@echo "  dashboard          (TODO: K1 Step 1.8)"
 	@echo "  smoke-llm          (TODO: K1 Step 1.7)"
@@ -73,7 +73,11 @@ logs:
 	docker compose -f infra/docker-compose.yml logs -f
 
 health:
-	@echo "TODO: K1 Step 1.4 — curl /api/health"; exit 1
+	@if command -v jq >/dev/null 2>&1; then \
+		curl -s localhost:8000/api/health | jq .; \
+	else \
+		curl -s localhost:8000/api/health; \
+	fi
 
 db-migrate:
 	POSTGRES_URL=$${POSTGRES_URL:-postgresql+asyncpg://agora:agora@localhost:5432/agora} \
@@ -88,7 +92,8 @@ db-shell:
 	docker exec -it agora-postgres psql -U agora -d agora
 
 api:
-	@echo "TODO: K1 Step 1.4 — uvicorn agora.platform.control_plane.app:app"; exit 1
+	uv run uvicorn agora.platform.control_plane.app:create_app \
+		--factory --host 0.0.0.0 --port 8000 --reload
 
 worker:
 	@echo "TODO: K1 Step 1.6 — agora-worker run"; exit 1

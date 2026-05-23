@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.14,<2",
     "temporalio==1.9.0",
     "litellm>=1.55,<2",
+    "langfuse>=2.50,<3",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.7,<3",
     "python-dotenv>=1.0,<2",
@@ -65,7 +66,7 @@ files = ["src/agora", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "temporalio.*"]
+module = ["litellm.*", "temporalio.*", "langfuse.*", "testcontainers.*", "asyncpg.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
