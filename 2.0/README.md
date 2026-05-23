@@ -52,7 +52,7 @@ The keystone plan defines five "Definition of done" items for K1. After running 
 |---|---|---|
 | 1 | `make up` brings up Postgres, Temporal, Langfuse, FastAPI, Next.js, Letta, Qdrant | `docker compose -f infra/docker-compose.yml ps` shows postgres / temporal / temporal-ui / qdrant / letta healthy. Langfuse is hosted (Langfuse Cloud), so it is not in compose — see "Drift from the plan" below. |
 | 2 | localhost:3000 shows empty AGORA dashboard with `PMs (0)` and `PRs (0)` placeholders | Open the dashboard. The header shows the current mode and 0 PMs running; the PRs card is a static placeholder until K5. |
-| 3 | `curl /api/health` returns `{"status": "ok", "services": {...}}` listing all services | `curl -s localhost:8000/api/health \| jq .` |
+| 3 | `curl /api/health` returns `{"status": "ok"\|"degraded", "services": {...}}` listing all services | `curl -s localhost:8000/api/health \| jq .`. Expect `degraded` for fresh checkouts: without `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` the Langfuse service reports `degraded`, and the aggregate is the worst-of across services. Set the keys, restart `make api`, and it flips to `ok`. |
 | 4 | A throwaway hello-world Temporal workflow runs end-to-end and shows up in Temporal Web UI | `make worker` in one terminal, `uv run agora-cli hello world` in another. Then open Temporal UI at localhost:8088. |
 | 5 | A throwaway LLM call (litellm to Sonnet) appears as a Langfuse span | `make smoke-llm`. The script prints the Langfuse trace URL; open it. The accompanying `budget_events` row is visible via the `psql` one-liner the script prints at the end. |
 
