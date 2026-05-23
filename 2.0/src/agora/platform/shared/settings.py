@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # Workspace root for /pms/<id>/ trees. Empty = use the repo dir at runtime.
     workspace_root: str = ""
 
+    # Default LLM models (override per-agent at runtime). Names follow
+    # litellm's "<provider>/<model>" routing convention.
+    agora_default_reasoning_model: str = "anthropic/claude-sonnet-4-5"
+    agora_default_cheap_model: str = "anthropic/claude-haiku-4-5"
+
     model_config = SettingsConfigDict(
         env_prefix="",
         env_file=".env",

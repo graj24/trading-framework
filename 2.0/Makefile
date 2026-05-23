@@ -106,7 +106,7 @@ dashboard:
 	@echo "TODO: K1 Step 1.8 — pnpm --dir dashboard dev"; exit 1
 
 smoke-llm:
-	@echo "TODO: K1 Step 1.7 — scripts/smoke_llm.py"; exit 1
+	uv run python scripts/smoke_llm.py
 
 clean:
 	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage dist build
