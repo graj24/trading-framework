@@ -56,16 +56,40 @@ def stub_lifespan_resources(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(state_module, "teardown_app_state", fake_teardown)
 
 
+class _FakeWorkflowHandle:
+    """Records signal invocations.
+
+    The endpoint awaits ``handle.signal(PMSupervisor.stop)`` with the
+    decorated method object; Temporal accepts either the bound method
+    or a string name. We record by ``__name__`` for ergonomic asserts
+    in the tests below.
+    """
+
+    def __init__(self) -> None:
+        self.signals: list[str] = []
+        self.raise_on_signal: Exception | None = None
+
+    async def signal(self, signal_method: Any, *args: Any) -> None:
+        if self.raise_on_signal is not None:
+            raise self.raise_on_signal
+        name = getattr(signal_method, "__name__", str(signal_method))
+        self.signals.append(name)
+
+
 class _FakeTemporalClient:
     """Records start_workflow invocations without touching a real cluster.
 
     The endpoint only awaits ``start_workflow`` and never inspects the
     return value, so we return ``None`` and stash the call args for any
     test that wants to assert on them.
+
+    For Step 2.3, also returns ``_FakeWorkflowHandle`` instances from
+    ``get_workflow_handle`` so signal dispatch is observable.
     """
 
     def __init__(self) -> None:
         self.started: list[dict[str, Any]] = []
+        self.handles: dict[str, _FakeWorkflowHandle] = {}
 
     async def start_workflow(
         self,
@@ -85,6 +109,11 @@ class _FakeTemporalClient:
             }
         )
         return None
+
+    def get_workflow_handle(self, workflow_id: str) -> _FakeWorkflowHandle:
+        if workflow_id not in self.handles:
+            self.handles[workflow_id] = _FakeWorkflowHandle()
+        return self.handles[workflow_id]
 
 
 @pytest.fixture
@@ -373,3 +402,191 @@ def test_spawn_marks_error_when_start_workflow_raises(
     assert calls["update_status"] == [("pm1", "spawned"), ("pm1", "error")]
     # workflow_id should NOT have been persisted since start_workflow failed.
     assert calls["update_workflow_id"] == []
+
+
+# --------------------------------------------------------- stop / pause / resume
+# Step 2.3 endpoints. These extend the same TestClient harness above; the
+# fake Temporal client now also records signal calls via _FakeWorkflowHandle.
+
+
+def _make_pm_record(
+    pm_id: str = "pm1",
+    *,
+    status: str = "running",
+    workflow_id: str | None = "pm-pm1",
+) -> pm_repo_module.PMRecord:
+    """Helper: build a PMRecord with sensible defaults for state-change tests."""
+    return pm_repo_module.PMRecord(
+        id=pm_id,
+        name=pm_id.upper(),
+        status=status,
+        starting_capital_inr=1_000_000.0,
+        spawned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        stopped_at=None,
+        prompt_path="/dev/null",
+        config={},
+        workflow_id=workflow_id,
+    )
+
+
+def _fake_temporal(client: TestClient) -> _FakeTemporalClient:
+    fake = client.app.state.agora.temporal_client  # type: ignore[attr-defined]
+    assert isinstance(fake, _FakeTemporalClient)
+    return fake
+
+
+# ---------- stop
+
+
+def test_stop_404_when_pm_missing(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_repo(monkeypatch, get_record=None)
+    r = client.post("/api/pms/missing/stop")
+    assert r.status_code == 404
+
+
+def test_stop_409_when_workflow_id_null(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_repo(monkeypatch, get_record=_make_pm_record(workflow_id=None))
+    r = client.post("/api/pms/pm1/stop")
+    assert r.status_code == 409
+    assert "workflow_id" in r.json()["detail"]
+
+
+def test_stop_signals_workflow_and_marks_stopped(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="running"))
+    r = client.post("/api/pms/pm1/stop")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"pm_id": "pm1", "status": "stopped"}
+
+    fake = _fake_temporal(client)
+    handle = fake.handles["pm-pm1"]
+    assert handle.signals == ["stop"]
+    assert calls["update_status"] == [("pm1", "stopped")]
+
+
+def test_stop_idempotent_when_already_stopped(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Already-stopped PM short-circuits to 200 without re-signalling."""
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="stopped"))
+    r = client.post("/api/pms/pm1/stop")
+    assert r.status_code == 200
+    assert r.json() == {"pm_id": "pm1", "status": "stopped"}
+
+    fake = _fake_temporal(client)
+    # No signal sent, no DB write — pure short-circuit.
+    assert "pm-pm1" not in fake.handles or fake.handles["pm-pm1"].signals == []
+    assert calls["update_status"] == []
+
+
+# ---------- pause
+
+
+def test_pause_signals_and_marks_paused(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="running"))
+    r = client.post("/api/pms/pm1/pause")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"pm_id": "pm1", "status": "paused"}
+
+    fake = _fake_temporal(client)
+    assert fake.handles["pm-pm1"].signals == ["pause"]
+    assert calls["update_status"] == [("pm1", "paused")]
+
+
+def test_pause_409_when_stopped(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="stopped"))
+    r = client.post("/api/pms/pm1/pause")
+    assert r.status_code == 409
+    assert "stopped" in r.json()["detail"]
+    assert calls["update_status"] == []
+
+
+def test_pause_idempotent_when_paused(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="paused"))
+    r = client.post("/api/pms/pm1/pause")
+    assert r.status_code == 200
+    assert r.json() == {"pm_id": "pm1", "status": "paused"}
+
+    fake = _fake_temporal(client)
+    assert "pm-pm1" not in fake.handles or fake.handles["pm-pm1"].signals == []
+    assert calls["update_status"] == []
+
+
+# ---------- resume
+
+
+def test_resume_signals_and_marks_running(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="paused"))
+    r = client.post("/api/pms/pm1/resume")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"pm_id": "pm1", "status": "running"}
+
+    fake = _fake_temporal(client)
+    assert fake.handles["pm-pm1"].signals == ["resume"]
+    assert calls["update_status"] == [("pm1", "running")]
+
+
+def test_resume_409_when_running(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resume from running is rejected — there's nothing to resume."""
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="running"))
+    r = client.post("/api/pms/pm1/resume")
+    assert r.status_code == 409
+    assert "paused" in r.json()["detail"]
+    assert calls["update_status"] == []
+
+
+def test_resume_409_when_stopped(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _stub_repo(monkeypatch, get_record=_make_pm_record(status="stopped"))
+    r = client.post("/api/pms/pm1/resume")
+    assert r.status_code == 409
+    assert "stopped" in r.json()["detail"]
+    assert calls["update_status"] == []
+
+
+# ---------- 503 envelope
+
+
+def test_state_change_endpoints_503_when_pool_is_none(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All three state-change endpoints return 503 when the pool is None."""
+
+    async def no_pool(settings: Settings) -> None:
+        return None
+
+    monkeypatch.setattr(state_module, "_build_pool", no_pool)
+    fastapi_app = app_module.create_app(settings)
+    with TestClient(fastapi_app) as c:
+        r_stop = c.post("/api/pms/pm1/stop")
+        r_pause = c.post("/api/pms/pm1/pause")
+        r_resume = c.post("/api/pms/pm1/resume")
+    assert r_stop.status_code == 503
+    assert r_pause.status_code == 503
+    assert r_resume.status_code == 503
+
+
+def test_state_change_endpoints_503_when_temporal_is_none(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """All three state-change endpoints return 503 when temporal_client is None."""
+
+    async def no_temporal(settings: Settings) -> None:
+        return None
+
+    monkeypatch.setattr(state_module, "_build_temporal_client", no_temporal)
+    fastapi_app = app_module.create_app(settings)
+    with TestClient(fastapi_app) as c:
+        r_stop = c.post("/api/pms/pm1/stop")
+        r_pause = c.post("/api/pms/pm1/pause")
+        r_resume = c.post("/api/pms/pm1/resume")
+    assert r_stop.status_code == 503
+    assert "temporal" in r_stop.json()["detail"].lower()
+    assert r_pause.status_code == 503
+    assert r_resume.status_code == 503

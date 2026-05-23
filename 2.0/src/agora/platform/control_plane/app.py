@@ -94,6 +94,20 @@ class SpawnPMResponse(BaseModel):
     workspace_path: str
 
 
+class PMStateChangeResponse(BaseModel):
+    """Body of ``POST /api/pms/{id}/{stop|pause|resume}``.
+
+    ``status`` is the new lifecycle status the API has just driven the
+    PM into (``stopped`` / ``paused`` / ``running``). The DB write here
+    is optimistic; the workflow itself may also write the same row on
+    graceful exit (e.g. ``mark_pm_stopped``). Whichever lands first
+    wins; both produce the same value.
+    """
+
+    pm_id: str
+    status: str
+
+
 class ModeTransition(BaseModel):
     mode: str
     at: datetime
@@ -296,6 +310,110 @@ def _build_router(settings: Settings) -> APIRouter:
             status="spawned",
             workspace_path=str(workspace_path),
         )
+
+    async def _resolve_handle_for_signal(state: AppState, pm_id: str) -> tuple[PMRecord, Any]:
+        """Shared 503/404/409 dance for stop/pause/resume.
+
+        Returns ``(pm_record, workflow_handle)``. Raises ``HTTPException``
+        with the correct status code otherwise. Caller still owns the
+        per-status idempotency / rejection rules; this helper only
+        guarantees the PM exists and has a startable workflow handle.
+        """
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        if state.temporal_client is None:
+            raise HTTPException(status_code=503, detail="temporal unavailable")
+        pm = await pm_repo.get_pm(state.postgres_pool, pm_id)
+        if pm is None:
+            raise HTTPException(status_code=404, detail=f"pm {pm_id!r} not found")
+        if pm.workflow_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"pm {pm_id!r} has no workflow_id (workflow never started)",
+            )
+        handle = state.temporal_client.get_workflow_handle(pm.workflow_id)
+        return pm, handle
+
+    @router.post("/pms/{pm_id}/stop", response_model=PMStateChangeResponse)
+    async def stop_pm(pm_id: str, request: Request) -> PMStateChangeResponse:
+        # Stop is a one-way door. Already-stopped PMs short-circuit to a
+        # 200 no-op so retries from a flaky client are safe; everything
+        # else funnels through the signal + optimistic DB write.
+        from agora.platform.workers.pm_supervisor import PMSupervisor
+
+        state = _get_state(request)
+        pm, handle = await _resolve_handle_for_signal(state, pm_id)
+        if pm.status == "stopped":
+            return PMStateChangeResponse(pm_id=pm_id, status="stopped")
+        try:
+            await handle.signal(PMSupervisor.stop)
+        except Exception as e:
+            logger.exception("stop_pm: signal failed for {}: {}", pm_id, e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to signal stop: {type(e).__name__}",
+            ) from e
+        # Optimistic DB write. The workflow's own ``mark_pm_stopped``
+        # activity will also write 'stopped' on graceful exit; both
+        # produce the same row, so the race is harmless.
+        await pm_repo.update_pm_status(state.postgres_pool, pm_id, "stopped")
+        return PMStateChangeResponse(pm_id=pm_id, status="stopped")
+
+    @router.post("/pms/{pm_id}/pause", response_model=PMStateChangeResponse)
+    async def pause_pm(pm_id: str, request: Request) -> PMStateChangeResponse:
+        # Pause is idempotent on paused (200, no re-signal). Stopped is
+        # a terminal state — pausing a stopped PM is a 409. Any other
+        # status (running / spawned) is allowed and signalled.
+        from agora.platform.workers.pm_supervisor import PMSupervisor
+
+        state = _get_state(request)
+        pm, handle = await _resolve_handle_for_signal(state, pm_id)
+        if pm.status == "stopped":
+            raise HTTPException(
+                status_code=409,
+                detail=f"pm {pm_id!r} is stopped; cannot pause",
+            )
+        if pm.status == "paused":
+            return PMStateChangeResponse(pm_id=pm_id, status="paused")
+        try:
+            await handle.signal(PMSupervisor.pause)
+        except Exception as e:
+            logger.exception("pause_pm: signal failed for {}: {}", pm_id, e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to signal pause: {type(e).__name__}",
+            ) from e
+        await pm_repo.update_pm_status(state.postgres_pool, pm_id, "paused")
+        return PMStateChangeResponse(pm_id=pm_id, status="paused")
+
+    @router.post("/pms/{pm_id}/resume", response_model=PMStateChangeResponse)
+    async def resume_pm(pm_id: str, request: Request) -> PMStateChangeResponse:
+        # Resume is only valid from paused. There is nothing to resume
+        # from running, and stopped is a one-way door — both reject 409.
+        from agora.platform.workers.pm_supervisor import PMSupervisor
+
+        state = _get_state(request)
+        pm, handle = await _resolve_handle_for_signal(state, pm_id)
+        if pm.status == "stopped":
+            raise HTTPException(
+                status_code=409,
+                detail=f"pm {pm_id!r} is stopped; cannot resume",
+            )
+        if pm.status != "paused":
+            raise HTTPException(
+                status_code=409,
+                detail=f"pm {pm_id!r} is {pm.status!r}; resume requires 'paused'",
+            )
+        try:
+            await handle.signal(PMSupervisor.resume)
+        except Exception as e:
+            logger.exception("resume_pm: signal failed for {}: {}", pm_id, e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to signal resume: {type(e).__name__}",
+            ) from e
+        await pm_repo.update_pm_status(state.postgres_pool, pm_id, "running")
+        return PMStateChangeResponse(pm_id=pm_id, status="running")
 
     @router.get("/mode", response_model=ModeResponse)
     async def get_mode(request: Request) -> ModeResponse:
