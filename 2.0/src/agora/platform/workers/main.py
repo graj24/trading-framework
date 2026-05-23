@@ -18,7 +18,16 @@ from temporalio.worker import Worker
 
 from agora.platform.observability.logging import configure_logging
 from agora.platform.shared.settings import get_settings
+from agora.platform.workers import _http, _pool
 from agora.platform.workers.hello import HelloWorkflow, say_hello
+from agora.platform.workers.pm_supervisor import (
+    PMSupervisor,
+    get_current_mode,
+    heartbeat_journal,
+    mark_pm_running,
+    mark_pm_stopped,
+    provision_pm_workspace,
+)
 
 DEFAULT_TASK_QUEUE = "agora"
 
@@ -40,8 +49,15 @@ async def main(task_queue: str = DEFAULT_TASK_QUEUE) -> None:
     worker = Worker(
         client,
         task_queue=task_queue,
-        workflows=[HelloWorkflow],
-        activities=[say_hello],
+        workflows=[HelloWorkflow, PMSupervisor],
+        activities=[
+            say_hello,
+            mark_pm_running,
+            mark_pm_stopped,
+            provision_pm_workspace,
+            get_current_mode,
+            heartbeat_journal,
+        ],
     )
 
     # Cancel the worker.run() task on SIGINT/SIGTERM. Worker.run() treats
@@ -66,6 +82,12 @@ async def main(task_queue: str = DEFAULT_TASK_QUEUE) -> None:
         # Expected on SIGINT/SIGTERM after our handler cancels run_task.
         pass
     finally:
+        # Best-effort: close the worker-process asyncpg pool that
+        # activities lazily built. Failures are logged inside.
+        await _pool.close_pool()
+        # Same pattern for the process-lifetime httpx client used by
+        # heartbeat (and future K3+ activity HTTP calls).
+        await _http.close_http_client()
         logger.info("worker stopped")
 
 

@@ -154,10 +154,13 @@ def test_request_id_generated_when_absent(
     assert rid is not None and len(rid) >= 32  # uuid4 hex is 32 chars sans dashes
 
 
-def test_pms_empty_when_pool_unavailable(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """If the lifespan couldn't build a pool, /api/pms returns []."""
+def test_pms_503_when_pool_unavailable(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the lifespan couldn't build a pool, /api/pms returns 503.
+
+    All DB-touching endpoints (list, get, spawn, mode) follow the same
+    rule — the API stays up so /api/health can report the degraded
+    state, but anything that needs the pool fails loudly.
+    """
 
     async def no_pool(settings: Settings) -> None:
         return None
@@ -166,8 +169,7 @@ def test_pms_empty_when_pool_unavailable(
     fastapi_app = app_module.create_app(settings)
     with TestClient(fastapi_app) as c:
         r = c.get("/api/pms")
-    assert r.status_code == 200
-    assert r.json() == []
+    assert r.status_code == 503
 
 
 def test_mode_returns_shape(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

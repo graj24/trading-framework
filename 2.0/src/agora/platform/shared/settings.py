@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     agora_default_reasoning_model: str = "anthropic/claude-sonnet-4-5"
     agora_default_cheap_model: str = "anthropic/claude-haiku-4-5"
 
+    # K2 Step 2.5 — worker process publishes activity events via
+    # POST /api/internal/events. Empty token disables the route (503),
+    # which is the correct local-dev behavior until an operator opts
+    # in. Worker reads the same env to authenticate; both sides see
+    # the same Settings, so config drift is one less thing to debug.
+    internal_event_token: str = ""
+    agora_api_url: str = "http://localhost:8000"
+
     model_config = SettingsConfigDict(
         env_prefix="",
         env_file=".env",

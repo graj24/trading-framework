@@ -11,11 +11,37 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from agora.platform.workers.hello import HelloWorkflow, say_hello
+from agora.platform.workers.pm_supervisor import (
+    HeartbeatInput,
+    PMConfig,
+    PMSupervisor,
+    ProvisionInput,
+    ProvisionResult,
+    get_current_mode,
+    heartbeat_journal,
+    mark_pm_running,
+    mark_pm_stopped,
+    provision_pm_workspace,
+)
 
 if TYPE_CHECKING:
     from agora.platform.workers.main import main
 
-__all__ = ["HelloWorkflow", "main", "say_hello"]
+__all__ = [
+    "HeartbeatInput",
+    "HelloWorkflow",
+    "PMConfig",
+    "PMSupervisor",
+    "ProvisionInput",
+    "ProvisionResult",
+    "get_current_mode",
+    "heartbeat_journal",
+    "main",
+    "mark_pm_running",
+    "mark_pm_stopped",
+    "provision_pm_workspace",
+    "say_hello",
+]
 
 
 def __getattr__(name: str) -> Any:
