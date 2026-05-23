@@ -7,7 +7,7 @@
         precommit-install precommit \
         up down logs health \
         db-migrate db-downgrade db-shell \
-        api worker dashboard smoke-llm \
+        api worker hello-smoke dashboard smoke-llm \
         clean
 
 help:
@@ -28,7 +28,8 @@ help:
 	@echo "  db-downgrade       alembic downgrade -1"
 	@echo "  db-shell           psql into the agora DB inside the container"
 	@echo "  api                uvicorn (factory mode) on :8000"
-	@echo "  worker             (TODO: K1 Step 1.6)"
+	@echo "  worker             run the Temporal worker on task_queue=agora"
+	@echo "  hello-smoke        run agora-cli hello world (worker must be up)"
 	@echo "  dashboard          (TODO: K1 Step 1.8)"
 	@echo "  smoke-llm          (TODO: K1 Step 1.7)"
 	@echo "  clean              remove caches and venv"
@@ -96,7 +97,10 @@ api:
 		--factory --host 0.0.0.0 --port 8000 --reload
 
 worker:
-	@echo "TODO: K1 Step 1.6 — agora-worker run"; exit 1
+	uv run python -m agora.platform.workers.main
+
+hello-smoke:
+	uv run agora-cli hello world
 
 dashboard:
 	@echo "TODO: K1 Step 1.8 — pnpm --dir dashboard dev"; exit 1
