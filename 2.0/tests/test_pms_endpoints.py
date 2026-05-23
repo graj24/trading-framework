@@ -8,6 +8,7 @@ we cover the response shape and the actual workspace tree.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -121,6 +122,19 @@ def client(settings: Settings) -> Iterator[TestClient]:
     fastapi_app = app_module.create_app(settings)
     with TestClient(fastapi_app) as c:
         yield c
+
+
+def _portal(client: TestClient) -> Any:
+    """Return the live BlockingPortal of an entered TestClient.
+
+    starlette types ``portal`` as ``BlockingPortal | None``; inside the
+    ``with TestClient(...) as c`` block it is always non-None. Asserting
+    here narrows the type for mypy and surfaces a real test bug if the
+    invariant ever changes.
+    """
+    portal = client.portal
+    assert portal is not None
+    return portal
 
 
 def _stub_repo(
@@ -649,3 +663,87 @@ def test_get_journal_caps_at_500(client: TestClient, monkeypatch: pytest.MonkeyP
     _stub_repo(monkeypatch, get_record=_make_pm_record())
     r = client.get("/api/pms/pm1/journal", params={"lines": 10000})
     assert r.status_code == 422
+
+
+# ----------------------------------------------------------------- events
+# Step 2.5 — spawn and stop must publish ``agent.lifecycle`` events on
+# the in-process bus. We subscribe via the live AppState and assert on
+# what landed.
+
+
+def _collect_events(client: TestClient) -> tuple[list[Any], asyncio.Event]:
+    """Spawn a subscriber on the app's event loop. Returns (events, done).
+
+    The caller drives it via ``client.portal``: ``portal.start_task_soon``
+    schedules the drain, then ``portal.call`` waits for the bus to
+    register at least one subscriber before publishing.
+    """
+    bus = client.app.state.agora.event_bus  # type: ignore[attr-defined]
+    received: list[Any] = []
+    done = asyncio.Event()
+
+    async def _drain() -> None:
+        async for event in bus.subscribe():
+            received.append({"type": event.type, "payload": event.payload})
+            done.set()
+            return
+
+    portal = _portal(client)
+    portal.start_task_soon(_drain)
+
+    async def _wait_for_subscriber() -> None:
+        for _ in range(100):
+            if bus.subscriber_count >= 1:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("subscriber never registered")
+
+    portal.call(_wait_for_subscriber)
+    return received, done
+
+
+def test_spawn_publishes_started_event(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_repo(monkeypatch, exists=False)
+    received, done = _collect_events(client)
+
+    r = client.post(
+        "/api/pms/spawn",
+        json={"name": "PM1", "starting_capital_inr": 1_000_000.0},
+    )
+    assert r.status_code == 200, r.text
+
+    async def _wait_for_event() -> None:
+        await asyncio.wait_for(done.wait(), timeout=1.0)
+
+    _portal(client).call(_wait_for_event)
+    assert len(received) == 1
+    assert received[0]["type"] == "agent.lifecycle"
+    assert received[0]["payload"] == {
+        "agent_id": "pm1",
+        "pm_id": "pm1",
+        "event": "started",
+        "role": "pm",
+    }
+
+
+def test_stop_publishes_stopped_event(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_repo(monkeypatch, get_record=_make_pm_record(status="running"))
+    received, done = _collect_events(client)
+
+    r = client.post("/api/pms/pm1/stop")
+    assert r.status_code == 200
+
+    async def _wait_for_event() -> None:
+        await asyncio.wait_for(done.wait(), timeout=1.0)
+
+    _portal(client).call(_wait_for_event)
+    assert len(received) == 1
+    assert received[0]["type"] == "agent.lifecycle"
+    assert received[0]["payload"]["event"] == "stopped"
+    assert received[0]["payload"]["pm_id"] == "pm1"

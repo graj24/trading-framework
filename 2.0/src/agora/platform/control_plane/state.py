@@ -26,6 +26,7 @@ from langfuse import Langfuse
 from loguru import logger
 from temporalio.client import Client as TemporalClient
 
+from agora.platform.control_plane.event_bus import EventBus
 from agora.platform.shared.settings import Settings
 
 # Per-resource startup timeout. Tight on purpose — a degraded local stack
@@ -47,6 +48,10 @@ class AppState:
     temporal_client: TemporalClient | None
     langfuse: Langfuse | None
     http_client: httpx.AsyncClient
+    # K2 Step 2.5 — in-process pub/sub for the live activity stream.
+    # Always present (no external service to fail), so consumers can
+    # call ``state.event_bus.publish(...)`` without a None-check.
+    event_bus: EventBus
 
 
 async def build_app_state(settings: Settings) -> AppState:
@@ -61,6 +66,7 @@ async def build_app_state(settings: Settings) -> AppState:
         temporal_client=temporal_client,
         langfuse=langfuse,
         http_client=http_client,
+        event_bus=EventBus(),
     )
 
 

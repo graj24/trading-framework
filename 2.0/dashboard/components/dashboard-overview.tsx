@@ -21,6 +21,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { EventTicker } from "@/components/event-ticker";
 import {
   fetchHealth,
   fetchMode,
@@ -110,6 +111,8 @@ export function DashboardOverview() {
         <PMsCard pms={pms.data} loading={pms.isPending} error={pms.isError} />
         <PRsCard />
       </div>
+
+      <EventTicker />
     </div>
   );
 }

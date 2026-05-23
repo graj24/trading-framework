@@ -144,7 +144,15 @@ async def get_current_mode(pm_id: str) -> str:
 
 @activity.defn(name="heartbeat_journal")
 async def heartbeat_journal(payload: HeartbeatInput) -> None:
-    """Append ``[<iso ts>] [<mode>]: alive`` to today's journal file."""
+    """Append ``[<iso ts>] [<mode>]: alive`` to today's journal file.
+
+    Also fires a best-effort ``pm.heartbeat`` to the API process so the
+    dashboard ticker shows it. The publish goes via the
+    ``POST /api/internal/events`` HTTP hook (Option A in plan §4 Step
+    2.5) because the worker is a separate process from the FastAPI
+    in-memory event bus. The publish is best-effort: a network blip
+    must not stall the heartbeat or fail the activity.
+    """
     from datetime import UTC, datetime
 
     from agora.platform.control_plane.pm_provision import resolve_workspace_root
@@ -159,6 +167,41 @@ async def heartbeat_journal(payload: HeartbeatInput) -> None:
     line = f"[{now.isoformat()}] [{payload.mode}]: alive\n"
     with journal.open("a", encoding="utf-8") as fh:
         fh.write(line)
+
+    # Best-effort dashboard publish. Imported here (not at module top)
+    # so the workflow sandbox validator never sees httpx at import time.
+    await _publish_heartbeat(payload.pm_id, payload.mode, now.isoformat())
+
+
+async def _publish_heartbeat(pm_id: str, mode: str, ts: str) -> None:
+    """Best-effort publish to ``POST /api/internal/events``.
+
+    Returns silently on any failure — the heartbeat already landed on
+    disk, which is the source of truth. The dashboard event is a
+    convenience surface; missing one is invisible to the system.
+    """
+    import httpx
+    from loguru import logger
+
+    from agora.platform.shared.settings import get_settings
+
+    settings = get_settings()
+    if not settings.internal_event_token:
+        # Token not configured → API rejects with 503. Skip the call so
+        # we don't spam logs every cycle. Re-enable by setting
+        # ``INTERNAL_EVENT_TOKEN`` in both the API and worker envs.
+        return
+    url = f"{settings.agora_api_url.rstrip('/')}/api/internal/events"
+    body = {
+        "type": "pm.heartbeat",
+        "payload": {"pm_id": pm_id, "mode": mode, "ts": ts},
+    }
+    headers = {"x-agora-token": settings.internal_event_token}
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(url, json=body, headers=headers)
+    except Exception as e:
+        logger.debug("heartbeat publish failed (non-fatal): {}", e)
 
 
 # ---------------------------------------------------------------- workflow

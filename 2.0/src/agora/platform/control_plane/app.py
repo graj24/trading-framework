@@ -37,10 +37,13 @@ from typing import Any
 from fastapi import (
     APIRouter,
     FastAPI,
+    Header,
     HTTPException,
     Query,
     Request,
     Response,
+    WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
@@ -125,6 +128,23 @@ class JournalResponse(BaseModel):
 
     pm_id: str
     lines: list[str]
+
+
+class InternalEventRequest(BaseModel):
+    """Body of ``POST /api/internal/events`` (worker-process publish hook).
+
+    K2 Step 2.5 Option A: the Temporal worker runs in a separate process
+    from the FastAPI app, so it cannot reach the in-process EventBus
+    directly. It POSTs here instead. K3+ may swap for NATS / LISTEN-NOTIFY;
+    the wire shape stays.
+
+    Type is plain ``str`` (not ``EventType``) so the worker doesn't have
+    to import ``event_bus``. The bus broadcasts whatever it gets; the
+    dashboard decides what to render.
+    """
+
+    type: str
+    payload: dict[str, Any]
 
 
 class ModeTransition(BaseModel):
@@ -341,6 +361,18 @@ def _build_router(settings: Settings) -> APIRouter:
                 detail=f"failed to persist workflow_id: {type(e).__name__}",
             ) from e
 
+        # Tell the dashboard. Best-effort; never raises (the bus drops
+        # on slow consumers and the publish itself doesn't await).
+        await state.event_bus.publish(
+            "agent.lifecycle",
+            {
+                "agent_id": pm_id,
+                "pm_id": pm_id,
+                "event": "started",
+                "role": "pm",
+            },
+        )
+
         return SpawnPMResponse(
             pm_id=pm_id,
             workflow_id=workflow_id,
@@ -394,6 +426,15 @@ def _build_router(settings: Settings) -> APIRouter:
         # activity will also write 'stopped' on graceful exit; both
         # produce the same row, so the race is harmless.
         await pm_repo.update_pm_status(state.postgres_pool, pm_id, "stopped")
+        await state.event_bus.publish(
+            "agent.lifecycle",
+            {
+                "agent_id": pm_id,
+                "pm_id": pm_id,
+                "event": "stopped",
+                "role": "pm",
+            },
+        )
         return PMStateChangeResponse(pm_id=pm_id, status="stopped")
 
     @router.post("/pms/{pm_id}/pause", response_model=PMStateChangeResponse)
@@ -473,6 +514,30 @@ def _build_router(settings: Settings) -> APIRouter:
             ),
         )
 
+    @router.post("/internal/events", include_in_schema=False)
+    async def internal_event(
+        req: InternalEventRequest,
+        request: Request,
+        x_agora_token: str = Header(...),
+    ) -> dict[str, bool]:
+        # Token-protected publish hook for the worker process. Empty
+        # configured token disables the route entirely (503) so that a
+        # mis-deployed setup never accidentally accepts unauthenticated
+        # publishes. We compare with == rather than secrets.compare_digest
+        # because the token is local-only and not yet a security boundary;
+        # if it becomes one in K3+, swap the comparison there.
+        state = _get_state(request)
+        configured = state.settings.internal_event_token
+        if not configured:
+            raise HTTPException(
+                status_code=503,
+                detail="internal events disabled (set internal_event_token)",
+            )
+        if x_agora_token != configured:
+            raise HTTPException(status_code=401, detail="invalid token")
+        await state.event_bus.publish(req.type, req.payload)
+        return {"ok": True}
+
     return router
 
 
@@ -507,13 +572,71 @@ def _make_lifespan(
             tc="ok" if state.temporal_client is not None else "down",
             lf="ok" if state.langfuse is not None else "off",
         )
+        # K2 Step 2.5 — background task: poll the mode controller and
+        # publish ``mode.changed`` on transitions. The loop owns its
+        # own cancellation; failure to start (e.g. asyncio internals)
+        # never blocks the API from coming up.
+        mode_task = asyncio.create_task(
+            _mode_change_loop(state),
+            name="agora-mode-change-loop",
+        )
         try:
             yield
         finally:
+            mode_task.cancel()
+            try:
+                await mode_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:  # defensive — never let teardown raise
+                logger.warning("mode_change_loop teardown raised: {}", e)
             await teardown_app_state(state)
             logger.info("AGORA control plane resources released")
 
     return lifespan
+
+
+# Poll cadence for the mode-change loop. Matches mode_loop.POLL_INTERVAL_S
+# (the K1 logger version); kept literal here so this file doesn't depend
+# on the legacy module.
+_MODE_POLL_INTERVAL_S: float = 30.0
+
+
+async def _mode_change_loop(state: AppState) -> None:
+    """Watch the mode controller and publish on transitions.
+
+    Compares the latest computed mode to the previous tick; only the
+    transition is announced. The loop swallows compute errors (Postgres
+    blip, etc.) — the next tick gets a fresh shot. Cancellation is the
+    only way out.
+    """
+    from agora.platform.control_plane import mode as mode_module
+    from agora.platform.control_plane.mode_loader import load_active_overrides
+
+    last_mode: str | None = None
+    logger.info("mode_change_loop starting (poll every {}s)", _MODE_POLL_INTERVAL_S)
+    try:
+        while True:
+            try:
+                now = datetime.now(UTC)
+                overrides = await load_active_overrides(state.postgres_pool, now)
+                result = mode_module.compute_mode(now, overrides=overrides)
+                if last_mode is not None and result.mode != last_mode:
+                    await state.event_bus.publish(
+                        "mode.changed",
+                        {
+                            "from": last_mode,
+                            "to": result.mode,
+                        },
+                    )
+                last_mode = result.mode
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("mode_change_loop tick failed: {}", e)
+            await asyncio.sleep(_MODE_POLL_INTERVAL_S)
+    finally:
+        logger.info("mode_change_loop stopping")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -539,6 +662,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/")
     async def root() -> dict[str, Any]:
         return {"service": "agora-control-plane", "version": app.version}
+
+    @app.websocket("/api/stream")
+    async def stream(ws: WebSocket) -> None:
+        # Live activity stream (K2 Step 2.5). Subscribers are independent
+        # — slow consumers drop events but never stall the publisher.
+        # The ``async for`` body breaks on disconnect; on any other
+        # exception we log and let the WS close — reconnect is the
+        # subscriber's responsibility.
+        state: AppState = ws.app.state.agora
+        await ws.accept()
+        try:
+            async for event in state.event_bus.subscribe():
+                await ws.send_json(
+                    {
+                        "type": event.type,
+                        "ts": event.ts,
+                        "payload": event.payload,
+                    }
+                )
+        except WebSocketDisconnect:
+            return
+        except Exception as e:
+            logger.warning("ws stream error: {}", e)
 
     logger.info("AGORA control plane initialized (log_format={})", settings.log_format)
     return app
