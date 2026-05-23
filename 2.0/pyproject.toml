@@ -75,10 +75,13 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-q"
+# Default loop is fast: drop the testcontainers-backed tests (which pull
+# an image and start Postgres) and the alembic round-trip. Run them
+# explicitly via `make test-all` or `pytest -m integration` / `-m slow`.
+addopts = "-q -m 'not integration and not slow'"
 markers = [
     "slow: marks tests as slow (use -m 'not slow' to skip)",
-    "integration: marks tests that need an in-process Temporal test server",
+    "integration: marks tests that need an in-process Temporal test server or testcontainers Postgres",
 ]
 
 [tool.coverage.run]

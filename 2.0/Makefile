@@ -3,7 +3,7 @@
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install lint fmt typecheck test test-cov ci-local \
+.PHONY: help install lint fmt typecheck test test-all test-cov ci-local \
         precommit-install precommit \
         up down logs health \
         db-migrate db-downgrade db-shell \
@@ -19,7 +19,8 @@ help:
 	@echo "  lint               ruff check + format --check"
 	@echo "  fmt                ruff format + ruff --fix"
 	@echo "  typecheck          mypy"
-	@echo "  test               pytest"
+	@echo "  test               pytest (skips integration + slow)"
+	@echo "  test-all           pytest including integration + slow"
 	@echo "  test-cov           pytest with coverage"
 	@echo "  ci-local           lint + typecheck + test"
 	@echo "  precommit-install  install pre-commit hooks"
@@ -54,6 +55,9 @@ typecheck:
 
 test:
 	uv run pytest
+
+test-all:
+	uv run pytest -m ''
 
 test-cov:
 	uv run pytest --cov=agora --cov-report=term-missing
