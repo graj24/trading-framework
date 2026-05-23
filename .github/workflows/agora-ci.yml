@@ -47,3 +47,8 @@ jobs:
 
       - name: Pytest
         run: uv run pytest
+
+# TODO (K8): add a sibling job that runs `pnpm --dir 2.0/dashboard install
+# --frozen-lockfile && pnpm --dir 2.0/dashboard build`. Skipped in K1 because
+# the dashboard is a frontend skeleton with no tests, and the Python pipeline
+# above must stay the gating signal until trading code lands.

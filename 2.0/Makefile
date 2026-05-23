@@ -7,7 +7,9 @@
         precommit-install precommit \
         up down logs health \
         db-migrate db-downgrade db-shell \
-        api worker hello-smoke dashboard smoke-llm \
+        api worker hello-smoke \
+        dashboard dashboard-build dashboard-install \
+        smoke-llm \
         clean
 
 help:
@@ -30,7 +32,9 @@ help:
 	@echo "  api                uvicorn (factory mode) on :8000"
 	@echo "  worker             run the Temporal worker on task_queue=agora"
 	@echo "  hello-smoke        run agora-cli hello world (worker must be up)"
-	@echo "  dashboard          (TODO: K1 Step 1.8)"
+	@echo "  dashboard          pnpm dev for the Next.js dashboard on :3000"
+	@echo "  dashboard-build    pnpm build (production)"
+	@echo "  dashboard-install  pnpm install --frozen-lockfile"
 	@echo "  smoke-llm          (TODO: K1 Step 1.7)"
 	@echo "  clean              remove caches and venv"
 
@@ -103,7 +107,13 @@ hello-smoke:
 	uv run agora-cli hello world
 
 dashboard:
-	@echo "TODO: K1 Step 1.8 — pnpm --dir dashboard dev"; exit 1
+	pnpm --dir dashboard dev
+
+dashboard-build:
+	pnpm --dir dashboard build
+
+dashboard-install:
+	pnpm --dir dashboard install --frozen-lockfile
 
 smoke-llm:
 	uv run python scripts/smoke_llm.py
