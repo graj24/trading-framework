@@ -73,6 +73,12 @@ class AgoraLLM:
         self._completion_fn: CompletionFn = completion_fn or litellm.acompletion
         self._cost_fn: CostFn = cost_fn or compute_cost_usd
         self._budget_recorder: BudgetRecorder = budget_recorder or record_budget_event
+        # Per-instance Langfuse cache. Built lazily on first .call() — see
+        # _maybe_langfuse(). Once set, reused for the lifetime of the
+        # instance. Caching None on construction failure is intentional: do
+        # not retry the SDK per call.
+        self._langfuse_client_cache: Langfuse | None = None
+        self._langfuse_client_built: bool = False
 
     # ------------------------------------------------------------------ public
 
@@ -148,16 +154,25 @@ class AgoraLLM:
     def _maybe_langfuse(self) -> Langfuse | None:
         """Return a Langfuse client if keys are configured, else None.
 
+        Memoized per-instance: the SDK is built once on first call, then
+        reused. Construction failures are cached as ``None`` — we do not
+        retry the SDK per call, because the failure modes (bad keys,
+        version skew) are persistent.
+
         Langfuse failures must never block the LLM call. If construction
-        raises (bad keys, network issues, version skew), we log a warning
-        and return None — callers will see ``langfuse_trace_id=None``.
+        raises, we log a warning and cache ``None``; callers will see
+        ``langfuse_trace_id=None``.
         """
         if self._langfuse_override is not None:
             return self._langfuse_override
+        if self._langfuse_client_built:
+            return self._langfuse_client_cache
+        self._langfuse_client_built = True
         if not self.settings.langfuse_public_key or not self.settings.langfuse_secret_key:
+            self._langfuse_client_cache = None
             return None
         try:
-            return Langfuse(
+            self._langfuse_client_cache = Langfuse(
                 public_key=self.settings.langfuse_public_key,
                 secret_key=self.settings.langfuse_secret_key,
                 host=self.settings.langfuse_host,
@@ -167,7 +182,8 @@ class AgoraLLM:
                 "Langfuse construction failed; continuing without tracing: {err}",
                 err=f"{type(e).__name__}: {e}",
             )
-            return None
+            self._langfuse_client_cache = None
+        return self._langfuse_client_cache
 
     def _open_trace(
         self,

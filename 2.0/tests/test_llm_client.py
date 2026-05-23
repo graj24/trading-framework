@@ -153,6 +153,94 @@ async def test_call_swallows_langfuse_errors() -> None:
     assert result.langfuse_trace_id is None
 
 
+async def test_call_reuses_langfuse_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Langfuse SDK is constructed once per AgoraLLM, not per .call()."""
+    construction_count = 0
+
+    class StubTrace:
+        def update(self, **kwargs: Any) -> None: ...
+
+    class CountingLangfuse:
+        def __init__(self, **kwargs: Any) -> None:
+            nonlocal construction_count
+            construction_count += 1
+
+        def trace(self, **kwargs: Any) -> StubTrace:
+            return StubTrace()
+
+        def flush(self) -> None: ...
+
+    # Patch the symbol the client module imports — the cache code path runs
+    # only when no override is supplied, so we must let the wrapper build
+    # the SDK itself from settings.
+    from agora.platform.llm import client as client_module
+
+    monkeypatch.setattr(client_module, "Langfuse", CountingLangfuse)
+
+    settings = _settings()
+    settings.langfuse_public_key = "pk_test"
+    settings.langfuse_secret_key = "sk_test"
+
+    async def fake_completion(**kwargs: Any) -> dict[str, Any]:
+        return _fake_response()
+
+    llm = AgoraLLM(
+        agent_id="smoke",
+        pm_id="pm1",
+        settings=settings,
+        completion_fn=fake_completion,
+        cost_fn=lambda usage, model: 0.001,
+        budget_recorder=_RecordingBudget(),
+    )
+
+    for _ in range(3):
+        await llm.call(
+            model="anthropic/claude-sonnet-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    assert construction_count == 1
+
+
+async def test_langfuse_construction_failure_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed Langfuse construction caches None — we do NOT retry per call."""
+    attempts = 0
+
+    class BoomConstructor:
+        def __init__(self, **kwargs: Any) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("bad keys")
+
+    from agora.platform.llm import client as client_module
+
+    monkeypatch.setattr(client_module, "Langfuse", BoomConstructor)
+
+    settings = _settings()
+    settings.langfuse_public_key = "pk_test"
+    settings.langfuse_secret_key = "sk_test"
+
+    async def fake_completion(**kwargs: Any) -> dict[str, Any]:
+        return _fake_response()
+
+    llm = AgoraLLM(
+        agent_id="smoke",
+        pm_id="pm1",
+        settings=settings,
+        completion_fn=fake_completion,
+        cost_fn=lambda usage, model: 0.001,
+        budget_recorder=_RecordingBudget(),
+    )
+
+    for _ in range(3):
+        result = await llm.call(
+            model="anthropic/claude-sonnet-4-5",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert result.langfuse_trace_id is None
+    # Construction attempted exactly once, even though it failed.
+    assert attempts == 1
+
+
 async def test_call_swallows_budget_errors() -> None:
     """If the budget recorder raises, the call still succeeds."""
 
