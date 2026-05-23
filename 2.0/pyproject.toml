@@ -70,7 +70,7 @@ files = ["src/agora", "tests"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "temporalio.*", "langfuse.*", "testcontainers.*", "asyncpg.*", "yaml"]
+module = ["litellm.*", "temporalio.*", "langfuse.*", "testcontainers.*", "asyncpg.*", "yaml", "nautilus_trader.*", "pandas", "pandas.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

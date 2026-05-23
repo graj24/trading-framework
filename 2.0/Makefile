@@ -9,7 +9,7 @@
         db-migrate db-downgrade db-shell \
         api worker hello-smoke \
         dashboard dashboard-build dashboard-install \
-        smoke-llm \
+        smoke-llm trading-smoke \
         clean
 
 help:
@@ -37,6 +37,7 @@ help:
 	@echo "  dashboard-build    pnpm build (production)"
 	@echo "  dashboard-install  pnpm install --frozen-lockfile"
 	@echo "  smoke-llm          (TODO: K1 Step 1.7)"
+	@echo "  trading-smoke      run NautilusTrader engine smoke (K3 Step 3.1)"
 	@echo "  clean              remove caches and venv"
 
 install:
@@ -121,6 +122,9 @@ dashboard-install:
 
 smoke-llm:
 	uv run python scripts/smoke_llm.py
+
+trading-smoke:
+	uv run python -m agora.apps.propfirm.trading.smoke
 
 clean:
 	rm -rf .venv .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage dist build
