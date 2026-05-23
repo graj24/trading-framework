@@ -1,0 +1,9 @@
+{
+  "name": "agora-dashboard",
+  "version": "0.0.1",
+  "private": true,
+  "_note": "populated in K1 Step 1.8",
+  "scripts": {},
+  "dependencies": {},
+  "devDependencies": {}
+}
