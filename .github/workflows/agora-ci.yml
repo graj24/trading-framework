@@ -20,7 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: 2.0
+        # Quoted on purpose — YAML parses `2.0` as a float (becomes "2")
+        # otherwise, and the runner can't find the directory.
+        working-directory: "2.0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
