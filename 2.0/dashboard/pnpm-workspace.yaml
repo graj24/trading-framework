@@ -1,0 +1,6 @@
+# pnpm 11 opt-in for native install scripts. Sharp ships prebuilt binaries
+# for our targets, so we accept its install script (it's a well-known dep
+# pulled in by Next.js for next/image). Add new opt-ins explicitly — pnpm
+# refuses to run install scripts that aren't listed here.
+allowBuilds:
+  sharp: true

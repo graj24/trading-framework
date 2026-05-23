@@ -1,0 +1,54 @@
+name: AGORA CI
+
+# Scoped to changes under 2.0/ so it does not run on changes to the legacy
+# trading-framework code at the repo root. The legacy deploy.yml is unaffected.
+
+on:
+  pull_request:
+    paths:
+      - "2.0/**"
+      - ".github/workflows/agora-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "2.0/**"
+      - ".github/workflows/agora-ci.yml"
+
+jobs:
+  lint-types-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: 2.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Sync dependencies
+        run: uv sync --all-groups
+
+      - name: Ruff check
+        run: uv run ruff check src tests
+
+      - name: Ruff format check
+        run: uv run ruff format --check src tests
+
+      - name: Mypy
+        run: uv run mypy
+
+      - name: Pytest
+        run: uv run pytest
+
+# TODO (K8): add a sibling job that runs `pnpm --dir 2.0/dashboard install
+# --frozen-lockfile && pnpm --dir 2.0/dashboard build`. Skipped in K1 because
+# the dashboard is a frontend skeleton with no tests, and the Python pipeline
+# above must stay the gating signal until trading code lands.

@@ -1,0 +1,117 @@
+# AGORA local development stack.
+#
+# Single bridge network `agora-net`. Postgres hosts three databases (agora,
+# temporal, letta) bootstrapped via ./postgres/init.sql. Temporal auto-setup
+# wires up its schema on first boot, then exposes gRPC on 7233 and Web UI on
+# 8088. Qdrant and Letta come up alongside.
+#
+# Langfuse is intentionally NOT in this compose file — we use Langfuse Cloud.
+# See plan/01-KEYSTONE.md §3 Step 1.2 for the rationale.
+
+name: agora
+
+networks:
+  agora-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  letta_data:
+
+services:
+  postgres:
+    # pgvector/pgvector:pg16 is the official Postgres 16 image with the
+    # pgvector extension preinstalled. Letta requires pgvector for its
+    # `passages` table; the upstream postgres:16-alpine image does not ship it.
+    image: pgvector/pgvector:pg16
+    container_name: agora-postgres
+    environment:
+      POSTGRES_USER: agora
+      POSTGRES_PASSWORD: agora
+      POSTGRES_DB: agora
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agora -d agora"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [agora-net]
+
+  temporal:
+    image: temporalio/auto-setup:1.27
+    container_name: agora-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: agora
+      POSTGRES_PWD: agora
+      POSTGRES_SEEDS: postgres
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    ports:
+      - "7233:7233"
+    healthcheck:
+      # auto-setup ships with `tctl`; cluster health = server reachable + ns up.
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks: [agora-net]
+
+  temporal-ui:
+    # Brief asked for temporalio/ui:2.40; Docker Hub publishes 2.40.0 / 2.40.1
+    # patch versions only. Pinning 2.40.1 (closest to the requested major+minor).
+    image: temporalio/ui:2.40.1
+    container_name: agora-temporal-ui
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: "http://localhost:3000"
+    ports:
+      - "8088:8080"
+    networks: [agora-net]
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.0
+    container_name: agora-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # qdrant images don't ship curl/wget reliably; use the bash /dev/tcp trick.
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [agora-net]
+
+  letta:
+    # Brief asked for letta/letta:0.5.0 but that tag does not exist on Docker
+    # Hub (versions jump from 0.4.x to 0.10.0+). Pinning the latest stable
+    # release available at compose-authoring time. Bumping requires a deliberate
+    # change here — better than :latest, which drifts under us.
+    image: letta/letta:0.16.8
+    container_name: agora-letta
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Letta reads LETTA_PG_URI for its async Postgres connection.
+      LETTA_PG_URI: postgresql://agora:agora@postgres:5432/letta
+    ports:
+      - "8283:8283"
+    volumes:
+      - letta_data:/root/.letta
+    networks: [agora-net]
