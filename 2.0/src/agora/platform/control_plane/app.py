@@ -2,15 +2,22 @@
 
 Endpoints:
 
-  GET /api/health  — service liveness, returns 200 even when degraded so
-                     monitoring distinguishes "API up, X sad" from "API dead".
-  GET /api/pms     — list PMs (empty in K1; the table exists, no rows yet).
-  GET /api/mode    — current AGORA operating mode (build / trading / freeze).
+  GET  /api/health         — service liveness, returns 200 even when degraded so
+                             monitoring distinguishes "API up, X sad" from "API dead".
+  GET  /api/pms            — list PMs in spawn order.
+  GET  /api/pms/{pm_id}    — fetch one PM record. 404 when missing.
+  POST /api/pms/spawn      — provision a PM workspace and create the DB row
+                             (status='spawned'). The Temporal workflow start
+                             lands in K2 Step 2.2; ``workflow_id`` is null here.
+  GET  /api/mode           — current AGORA operating mode (build / trading / freeze).
 
 Cross-cutting:
   - Lifespan-scoped resources (Postgres pool, Temporal client, Langfuse SDK,
     shared httpx client) live on ``app.state.agora`` and are reused across
     requests. Built once at startup, torn down on shutdown.
+  - DB-touching endpoints return 503 when the pool is None (e.g. Postgres
+    was unavailable at app startup). The /api/health endpoint reports the
+    same condition without erroring so monitoring can still poll it.
   - X-Request-ID middleware: pulls header or generates a UUID4, binds it onto
     loguru's contextualize() so every log line for that request carries it.
   - CORS for http://localhost:3000 (the dashboard).
@@ -20,18 +27,20 @@ Cross-cutting:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from agora.platform.control_plane import health
+from agora.platform.control_plane import health, pm_provision, pm_repo
+from agora.platform.control_plane.pm_repo import PMRecord, PMSummary
 from agora.platform.control_plane.state import (
     AppState,
     build_app_state,
@@ -41,6 +50,12 @@ from agora.platform.observability.logging import configure_logging
 from agora.platform.shared.settings import Settings, get_settings
 
 REQUEST_ID_HEADER = "X-Request-ID"
+# name must start with a letter; allow alnum + space + hyphen + underscore.
+# 2-32 chars total. Mirrors the regex in plan/01-KEYSTONE.md §4 Step 2.1.
+_PM_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 _-]{1,31}$")
+# Sane upper bound on starting capital — 1e9 INR is well above any plausible
+# paper-trading allocation; reject above as 422 to catch unit-of-measure bugs.
+_MAX_STARTING_CAPITAL_INR = 1e9
 
 
 class ServiceHealth(BaseModel):
@@ -53,12 +68,28 @@ class HealthResponse(BaseModel):
     services: dict[str, ServiceHealth]
 
 
-class PMSummary(BaseModel):
-    """Public PM record. Empty list in K1; populated in K2."""
+class SpawnPMRequest(BaseModel):
+    """Body of ``POST /api/pms/spawn``."""
 
-    id: str
-    name: str
+    name: str = Field(..., description="Display name. pm_id is derived from this.")
+    starting_capital_inr: float = Field(..., gt=0, le=_MAX_STARTING_CAPITAL_INR)
+    prompt_path: str | None = Field(
+        default=None,
+        description="Optional. Defaults to /dev/null until K7 ships PM persona prompts.",
+    )
+
+
+class SpawnPMResponse(BaseModel):
+    """Body of the spawn endpoint response.
+
+    ``workflow_id`` is null in K2 Step 2.1 — the PMSupervisor workflow
+    is started in Step 2.2, which will populate this field on response.
+    """
+
+    pm_id: str
+    workflow_id: str | None
     status: str
+    workspace_path: str
 
 
 class ModeTransition(BaseModel):
@@ -115,16 +146,102 @@ def _build_router(settings: Settings) -> APIRouter:
 
     @router.get("/pms", response_model=list[PMSummary])
     async def list_pms(request: Request) -> list[PMSummary]:
-        # K1: schema exists, no rows. The query goes through the shared
-        # asyncpg pool to avoid pulling SQLAlchemy session machinery into the
-        # control plane before there's a real model.
+        # The query goes through the shared asyncpg pool to avoid pulling
+        # SQLAlchemy session machinery into the control plane before there's
+        # a real model. 503 when the pool is unavailable (e.g. Postgres was
+        # down at app startup) — uniform with the other DB-touching routes.
         state = _get_state(request)
         if state.postgres_pool is None:
-            logger.warning("list_pms: postgres pool unavailable; returning []")
-            return []
-        async with state.postgres_pool.acquire() as conn:
-            rows = await conn.fetch("SELECT id, name, status FROM pms ORDER BY spawned_at")
-        return [PMSummary(id=r["id"], name=r["name"], status=r["status"]) for r in rows]
+            logger.warning("list_pms: postgres pool unavailable")
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        return await pm_repo.list_pms(state.postgres_pool)
+
+    @router.get("/pms/{pm_id}", response_model=PMRecord)
+    async def get_pm(pm_id: str, request: Request) -> PMRecord:
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        record = await pm_repo.get_pm(state.postgres_pool, pm_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"pm {pm_id!r} not found")
+        return record
+
+    @router.post("/pms/spawn", response_model=SpawnPMResponse)
+    async def spawn_pm(req: SpawnPMRequest, request: Request) -> SpawnPMResponse:
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+
+        # Validate name + derive pm_id. Pydantic gave us type/range checks;
+        # the regex is the alphabet rule from plan §4 Step 2.1.
+        name = req.name
+        if not _PM_NAME_RE.match(name):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "name must match ^[A-Za-z][A-Za-z0-9 _-]{1,31}$ "
+                    "(2-32 chars, leading letter, alnum/space/-/_ only)"
+                ),
+            )
+        pm_id = name.lower().replace(" ", "_").replace("-", "_")
+        prompt_path = req.prompt_path or "/dev/null"
+
+        # Duplicate-id guard. The PK on pms.id is the safety net; this
+        # check turns the conflict into a clean 409 before we touch the
+        # filesystem.
+        if await pm_repo.pm_exists(state.postgres_pool, pm_id):
+            raise HTTPException(status_code=409, detail=f"pm {pm_id!r} already exists")
+
+        # 1) Insert row in 'provisioning' state.
+        try:
+            await pm_repo.insert_pm(
+                state.postgres_pool,
+                pm_id=pm_id,
+                name=name,
+                starting_capital_inr=req.starting_capital_inr,
+                prompt_path=prompt_path,
+                config={},
+            )
+        except Exception as e:  # asyncpg.UniqueViolationError or worse
+            logger.exception("spawn_pm: insert_pm failed for {}: {}", pm_id, e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to insert pm {pm_id!r}: {type(e).__name__}",
+            ) from e
+
+        # 2) Provision workspace (idempotent). On failure, best-effort
+        # mark the row as 'error' so the dashboard surfaces the problem
+        # instead of leaving the PM in 'provisioning' forever.
+        try:
+            workspace_root = pm_provision.resolve_workspace_root(state.settings)
+            workspace_path = await pm_provision.provision_workspace(
+                pm_id=pm_id,
+                name=name,
+                starting_capital_inr=req.starting_capital_inr,
+                workspace_root=workspace_root,
+                settings=state.settings,
+            )
+        except Exception as e:
+            logger.exception("spawn_pm: provision_workspace failed for {}: {}", pm_id, e)
+            try:
+                await pm_repo.update_pm_status(state.postgres_pool, pm_id, "error")
+            except Exception as inner:
+                logger.warning("spawn_pm: also failed to mark {} as error: {}", pm_id, inner)
+            raise HTTPException(
+                status_code=500,
+                detail=f"failed to provision workspace: {type(e).__name__}",
+            ) from e
+
+        # 3) Mark the row 'spawned'. K2 Step 2.2 will start the Temporal
+        # workflow and flip this to 'running'.
+        await pm_repo.update_pm_status(state.postgres_pool, pm_id, "spawned")
+
+        return SpawnPMResponse(
+            pm_id=pm_id,
+            workflow_id=None,
+            status="spawned",
+            workspace_path=str(workspace_path),
+        )
 
     @router.get("/mode", response_model=ModeResponse)
     async def get_mode(request: Request) -> ModeResponse:
@@ -132,6 +249,8 @@ def _build_router(settings: Settings) -> APIRouter:
         from agora.platform.control_plane.mode_loader import load_active_overrides
 
         state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
         now = datetime.now(UTC)
         overrides = await load_active_overrides(state.postgres_pool, now)
         result = mode_module.compute_mode(now, overrides=overrides)
