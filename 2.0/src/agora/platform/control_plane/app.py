@@ -129,9 +129,12 @@ def _build_router(settings: Settings) -> APIRouter:
     @router.get("/mode", response_model=ModeResponse)
     async def get_mode(request: Request) -> ModeResponse:
         from agora.platform.control_plane import mode as mode_module
+        from agora.platform.control_plane.mode_loader import load_active_overrides
 
+        state = _get_state(request)
         now = datetime.now(UTC)
-        result = mode_module.compute_mode(now)
+        overrides = await load_active_overrides(state.postgres_pool, now)
+        result = mode_module.compute_mode(now, overrides=overrides)
         return ModeResponse(
             mode=result.mode,
             as_of=now,
