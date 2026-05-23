@@ -596,9 +596,10 @@ def _make_lifespan(
     return lifespan
 
 
-# Poll cadence for the mode-change loop. Matches mode_loop.POLL_INTERVAL_S
-# (the K1 logger version); kept literal here so this file doesn't depend
-# on the legacy module.
+# Poll cadence for the mode-change event-publishing loop. K1 had a
+# separate mode_loop.py that polled-and-logged; that module was
+# deleted in post-audit/k2-5 once K2's event-publishing loop here
+# took over. Kept literal so this file has no legacy dependency.
 _MODE_POLL_INTERVAL_S: float = 30.0
 
 
