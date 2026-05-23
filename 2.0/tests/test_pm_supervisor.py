@@ -38,6 +38,8 @@ from agora.platform.workers.pm_supervisor import (
     PMSupervisor,
     ProvisionInput,
     ProvisionResult,
+    TradingCycleInput,
+    TradingCycleOutput,
 )
 
 pytestmark = pytest.mark.integration
@@ -88,12 +90,18 @@ def _make_mock_activities(
     async def mock_heartbeat(payload: HeartbeatInput) -> None:
         calls.append(("heartbeat", payload.mode))
 
+    @activity.defn(name="trading_cycle")
+    async def mock_trading_cycle(payload: TradingCycleInput) -> TradingCycleOutput:
+        calls.append(("trading_cycle", payload.pm_id))
+        return TradingCycleOutput(placed=[], closed=[], skipped=[], rejected=[])
+
     return [
         mock_provision,
         mock_running,
         mock_stopped,
         mock_get_mode,
         mock_heartbeat,
+        mock_trading_cycle,
     ]
 
 
@@ -236,3 +244,119 @@ async def test_supervisor_pause_skips_heartbeats_then_resumes() -> None:
 
     # Sanity: the stopped marker ran on graceful exit.
     assert any(c[0] == "stopped" for c in calls), calls
+
+
+async def test_supervisor_runs_trading_cycle_when_mode_is_trading() -> None:
+    """In trading mode the workflow invokes ``trading_cycle``, not heartbeat.
+
+    Audit-style behavioural assertion for K3 Step 3.5: the workflow's
+    branch predicate (``if mode == "trading"``) must dispatch the
+    cycle activity, and the heartbeat activity must NOT run on the
+    same iteration. Both branches running would mean trading cycles
+    and "alive" ticks racing each other in the journal.
+    """
+    try:
+        env = await _start_env()
+    except Exception as e:
+        pytest.skip(f"Temporal test server unavailable: {e}")
+
+    calls: list[tuple[str, Any]] = []
+    activities = _make_mock_activities(calls, mode="trading")
+    task_queue = f"test-supervisor-{uuid.uuid4()}"
+
+    async with (
+        env,
+        Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[PMSupervisor],
+            activities=activities,
+        ),
+    ):
+        config = PMConfig(
+            pm_id="pm1",
+            name="PM1",
+            starting_capital_inr=1_000_000.0,
+            build_cycle_seconds=5,
+            trading_cycle_seconds=5,
+        )
+        handle = await env.client.start_workflow(
+            PMSupervisor.run,
+            config,
+            id=f"pm-test-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+        # Wait for at least one trading cycle to land.
+        for _ in range(50):
+            if any(c[0] == "trading_cycle" for c in calls):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail(f"no trading cycle observed within budget; calls={calls}")
+
+        await handle.signal(PMSupervisor.stop)
+        await handle.result()
+
+    assert ("trading_cycle", "pm1") in calls
+    # Heartbeat must not fire in trading mode — that branch is the
+    # build-mode placeholder.
+    assert all(
+        c[0] != "heartbeat" for c in calls
+    ), f"heartbeat fired in trading mode; calls={calls}"
+
+
+async def test_supervisor_runs_heartbeat_when_mode_is_build() -> None:
+    """In build mode the workflow invokes ``heartbeat``, not the trading cycle.
+
+    Mirror of the trading test above — pins the other side of the
+    branch predicate. K2 behaviour preserved.
+    """
+    try:
+        env = await _start_env()
+    except Exception as e:
+        pytest.skip(f"Temporal test server unavailable: {e}")
+
+    calls: list[tuple[str, Any]] = []
+    activities = _make_mock_activities(calls, mode="build")
+    task_queue = f"test-supervisor-{uuid.uuid4()}"
+
+    async with (
+        env,
+        Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[PMSupervisor],
+            activities=activities,
+        ),
+    ):
+        config = PMConfig(
+            pm_id="pm1",
+            name="PM1",
+            starting_capital_inr=1_000_000.0,
+            build_cycle_seconds=5,
+            trading_cycle_seconds=5,
+        )
+        handle = await env.client.start_workflow(
+            PMSupervisor.run,
+            config,
+            id=f"pm-test-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+        for _ in range(50):
+            if any(c[0] == "heartbeat" for c in calls):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail(f"no heartbeat observed within budget; calls={calls}")
+
+        await handle.signal(PMSupervisor.stop)
+        await handle.result()
+
+    assert ("heartbeat", "build") in calls
+    # Trading cycle must not fire in build mode — that's the K3.5
+    # property the audit test above pins from the other side.
+    assert all(
+        c[0] != "trading_cycle" for c in calls
+    ), f"trading_cycle fired in build mode; calls={calls}"

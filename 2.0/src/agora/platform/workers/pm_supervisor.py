@@ -95,6 +95,30 @@ class HeartbeatInput:
     mode: str  # "build" | "trading" | "pre_trade_freeze"
 
 
+@dataclass
+class TradingCycleInput:
+    """Args for the trading-cycle activity (K3 Step 3.5)."""
+
+    pm_id: str
+
+
+@dataclass
+class TradingCycleOutput:
+    """Result shape for the trading-cycle activity.
+
+    All four lists are plain JSON (ints / strings) so the workflow can
+    read them across the activity boundary without touching the
+    sandbox-forbidden imports that produced them. Mirrors
+    :class:`agora.apps.propfirm.trading.cycle.CycleResult` minus the
+    ``pm_id`` (which the workflow already has on hand).
+    """
+
+    placed: list[int]
+    closed: list[int]
+    skipped: list[str]
+    rejected: list[str]
+
+
 # --------------------------------------------------------------- activities
 # Activities run on the worker process, outside the workflow sandbox.
 # ALL non-stdlib imports must be deferred to function bodies so the
@@ -197,18 +221,14 @@ async def heartbeat_journal(payload: HeartbeatInput) -> None:
     """
     from datetime import UTC, datetime
 
-    from agora.platform.control_plane.pm_provision import resolve_workspace_root
+    from agora.platform.shared.journal import journal_append
 
     now = datetime.now(UTC)
-    today = now.strftime("%Y-%m-%d")
-    journal_dir = resolve_workspace_root() / payload.pm_id / "journals"
-    # The provision activity already created this dir; re-mkdir is cheap
-    # and protects against an out-of-order operator who clears the tree.
-    journal_dir.mkdir(parents=True, exist_ok=True)
-    journal = journal_dir / f"{today}.md"
-    line = f"[{now.isoformat()}] [{payload.mode}]: alive\n"
-    with journal.open("a", encoding="utf-8") as fh:
-        fh.write(line)
+    line = f"[{now.isoformat()}] [{payload.mode}]: alive"
+    # Centralised journal helper (post-K2 audit refactor): handles
+    # workspace-root resolution, mkdir-if-missing, UTC-bounded
+    # filename, and append-only write. Same on-disk content as before.
+    journal_append(payload.pm_id, line, now=now)
 
     # Best-effort dashboard publish. Imported here (not at module top)
     # so the workflow sandbox validator never sees httpx at import time.
@@ -251,6 +271,32 @@ async def _publish_heartbeat(pm_id: str, mode: str, ts: str) -> None:
         logger.debug("heartbeat publish failed (non-fatal): {}", e)
     except Exception as e:  # defensive — never let teardown raise
         logger.debug("heartbeat publish failed (non-fatal): {}", e)
+
+
+@activity.defn(name="trading_cycle")
+async def trading_cycle_activity(payload: TradingCycleInput) -> TradingCycleOutput:
+    """Run one trading cycle for a PM (K3 Step 3.5).
+
+    Defers heavy imports inside the body to keep the workflow sandbox
+    clean. The cycle module pulls in NautilusTrader (via the parquet
+    market data adapter), pandas, asyncpg, and the broker — none of
+    which the workflow validator can see at import time.
+
+    The activity body itself runs outside the sandbox; the sandbox-
+    safety property is the absence of these imports at module top.
+    See module docstring for the workflow/activity sandbox split.
+    """
+    from agora.apps.propfirm.trading.cycle import run_trading_cycle
+    from agora.platform.workers._pool import get_or_build_pool
+
+    pool = await get_or_build_pool()
+    result = await run_trading_cycle(pool, payload.pm_id)
+    return TradingCycleOutput(
+        placed=list(result.placed),
+        closed=list(result.closed),
+        skipped=list(result.skipped),
+        rejected=list(result.rejected),
+    )
 
 
 # ---------------------------------------------------------------- workflow
@@ -328,23 +374,57 @@ class PMSupervisor:
                     start_to_close_timeout=timedelta(seconds=5),
                 )
 
-                await workflow.execute_activity(
-                    heartbeat_journal,
-                    HeartbeatInput(pm_id=config.pm_id, mode=mode),
-                    # Bumped from 10s: the activity does a file write +
-                    # an HTTP POST + (best-effort) DB writes. 10s gave
-                    # only 3-4x headroom; a transient API slowdown
-                    # could trip it. 30s gives ~10x.
-                    start_to_close_timeout=timedelta(seconds=30),
-                    # Heartbeats are best-effort signals, not guaranteed
-                    # delivery. Temporal's default retry policy would
-                    # re-run a slow tick and produce duplicate journal
-                    # lines (the activity uses ``open("a")`` — append-
-                    # only, no idempotency key). The next cycle's
-                    # heartbeat (one cadence period later) is the right
-                    # way to recover from a missed tick.
-                    retry_policy=RetryPolicy(maximum_attempts=1),
-                )
+                if mode == "trading":
+                    # K3.5: real trading cycle. The activity loads
+                    # market data, runs the momentum signal, and
+                    # places/closes orders via the AGORA broker. It
+                    # journals each placement/skip/rejection, so we
+                    # do NOT fall through to the heartbeat below
+                    # (the cycle's own journal lines replace the
+                    # plain "alive" tick).
+                    #
+                    # Generous timeout: the cycle does N market-data
+                    # reads + a list_open_trades + a write per
+                    # symbol. 60s gives ~10x headroom on a 10-symbol
+                    # NIFTY watchlist.
+                    #
+                    # No retries: same reasoning as the heartbeat —
+                    # the activity's writes (broker.submit_order,
+                    # close_trade) are not idempotent. Re-running on
+                    # transient failure could double-place an order.
+                    # The next cycle one cadence period later is the
+                    # right recovery path.
+                    await workflow.execute_activity(
+                        trading_cycle_activity,
+                        TradingCycleInput(pm_id=config.pm_id),
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                else:
+                    # Build / pre_trade_freeze: K2 placeholder
+                    # heartbeat. Trading work happens only in
+                    # trading mode; the rest of the day the PM is
+                    # alive but not trading.
+                    await workflow.execute_activity(
+                        heartbeat_journal,
+                        HeartbeatInput(pm_id=config.pm_id, mode=mode),
+                        # Bumped from 10s: the activity does a file
+                        # write + an HTTP POST + (best-effort) DB
+                        # writes. 10s gave only 3-4x headroom; a
+                        # transient API slowdown could trip it. 30s
+                        # gives ~10x.
+                        start_to_close_timeout=timedelta(seconds=30),
+                        # Heartbeats are best-effort signals, not
+                        # guaranteed delivery. Temporal's default
+                        # retry policy would re-run a slow tick and
+                        # produce duplicate journal lines (the
+                        # activity uses ``open("a")`` — append-only,
+                        # no idempotency key). The next cycle's
+                        # heartbeat (one cadence period later) is
+                        # the right way to recover from a missed
+                        # tick.
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
 
                 # Mode-aware cadence. Both default to 60s in K2 (per plan
                 # §4 DoD #3); K3 may diverge. Choosing duration in the
@@ -369,9 +449,12 @@ __all__ = [
     "PMSupervisor",
     "ProvisionInput",
     "ProvisionResult",
+    "TradingCycleInput",
+    "TradingCycleOutput",
     "get_current_mode",
     "heartbeat_journal",
     "mark_pm_running",
     "mark_pm_stopped",
     "provision_pm_workspace",
+    "trading_cycle_activity",
 ]

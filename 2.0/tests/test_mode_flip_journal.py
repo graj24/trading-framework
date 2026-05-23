@@ -6,16 +6,21 @@ format string was inspected but no test ever observed both shapes
 landing in the same journal during a real mode flip. This test closes
 that gap.
 
+K3.5 update: the workflow now branches on mode — build (and any
+non-trading mode) goes through ``heartbeat_journal``, trading goes
+through ``trading_cycle_activity``. Both write to the PM's journal,
+just with different prefixes. The behavioural property is still "the
+workflow's mode-aware branching produces journal entries that
+distinguish the modes"; the test now mocks both activities (in K2 the
+trading branch did not exist).
+
 Approach: time-skipping ``WorkflowEnvironment`` (matches the K2
 supervisor tests' default) with a stateful ``get_current_mode`` mock
 that returns "build" for the first two heartbeats and "trading" for
-the next two. The ``heartbeat_journal`` activity is also mocked but
-mirrors the production format string — the property under test is
-"the workflow's mode argument flows into the journal text", not
-"the journal file gets created in the right directory" (that's
-covered by test_pm_provision and the workflow code does no journal
-I/O). After four cycles we stop the workflow and assert the journal
-has both ``[build]:`` and ``[trading]:`` entries.
+the next two. Both ``heartbeat_journal`` and ``trading_cycle_activity``
+are mocked but each writes a mode-tagged line so we can observe the
+branch the workflow took. After four cycles we stop the workflow and
+assert the journal has both ``[build]:`` and ``[trading]:`` entries.
 """
 
 from __future__ import annotations
@@ -37,6 +42,8 @@ from agora.platform.workers.pm_supervisor import (
     PMSupervisor,
     ProvisionInput,
     ProvisionResult,
+    TradingCycleInput,
+    TradingCycleOutput,
 )
 
 pytestmark = pytest.mark.integration
@@ -108,6 +115,21 @@ async def test_journal_records_both_build_and_trading_entries(tmp_path: Path) ->
         with (journal_dir / f"{today}.md").open("a", encoding="utf-8") as fh:
             fh.write(line)
 
+    @activity.defn(name="trading_cycle")
+    async def mock_trading_cycle(payload: TradingCycleInput) -> TradingCycleOutput:
+        # K3.5 trading branch — mirror the production journal-line
+        # shape used by the trading-cycle activity (no orders here,
+        # so just an empty cycle line tagged ``[trading]:``). The
+        # property under test is the workflow's mode-aware dispatch:
+        # if this mock fires we know the workflow took the trading
+        # branch.
+        now = datetime.now(UTC)
+        today = now.strftime("%Y-%m-%d")
+        line = f"[{now.isoformat()}] [trading]: alive\n"
+        with (journal_dir / f"{today}.md").open("a", encoding="utf-8") as fh:
+            fh.write(line)
+        return TradingCycleOutput(placed=[], closed=[], skipped=[], rejected=[])
+
     task_queue = f"test-mode-flip-{uuid.uuid4()}"
 
     async with (
@@ -122,6 +144,7 @@ async def test_journal_records_both_build_and_trading_entries(tmp_path: Path) ->
                 mock_stopped,
                 mock_get_mode,
                 mock_heartbeat,
+                mock_trading_cycle,
             ],
         ),
     ):

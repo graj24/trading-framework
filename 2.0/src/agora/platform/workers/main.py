@@ -27,6 +27,7 @@ from agora.platform.workers.pm_supervisor import (
     mark_pm_running,
     mark_pm_stopped,
     provision_pm_workspace,
+    trading_cycle_activity,
 )
 
 DEFAULT_TASK_QUEUE = "agora"
@@ -57,6 +58,7 @@ async def main(task_queue: str = DEFAULT_TASK_QUEUE) -> None:
             provision_pm_workspace,
             get_current_mode,
             heartbeat_journal,
+            trading_cycle_activity,
         ],
     )
 
