@@ -179,11 +179,16 @@ async def _publish_heartbeat(pm_id: str, mode: str, ts: str) -> None:
     Returns silently on any failure — the heartbeat already landed on
     disk, which is the source of truth. The dashboard event is a
     convenience surface; missing one is invisible to the system.
+
+    Uses the process-lifetime httpx client (``workers/_http.py``) so
+    we're not opening a fresh socket every cycle. The client builds
+    lazily on first call; the worker's shutdown path closes it.
     """
-    import httpx
+    import httpx  # only for the exception type
     from loguru import logger
 
     from agora.platform.shared.settings import get_settings
+    from agora.platform.workers._http import get_or_build_http_client
 
     settings = get_settings()
     if not settings.internal_event_token:
@@ -198,9 +203,11 @@ async def _publish_heartbeat(pm_id: str, mode: str, ts: str) -> None:
     }
     headers = {"x-agora-token": settings.internal_event_token}
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            await client.post(url, json=body, headers=headers)
-    except Exception as e:
+        client = await get_or_build_http_client()
+        await client.post(url, json=body, headers=headers)
+    except httpx.HTTPError as e:
+        logger.debug("heartbeat publish failed (non-fatal): {}", e)
+    except Exception as e:  # defensive — never let teardown raise
         logger.debug("heartbeat publish failed (non-fatal): {}", e)
 
 

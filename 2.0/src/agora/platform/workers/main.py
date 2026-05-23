@@ -18,7 +18,7 @@ from temporalio.worker import Worker
 
 from agora.platform.observability.logging import configure_logging
 from agora.platform.shared.settings import get_settings
-from agora.platform.workers import _pool
+from agora.platform.workers import _http, _pool
 from agora.platform.workers.hello import HelloWorkflow, say_hello
 from agora.platform.workers.pm_supervisor import (
     PMSupervisor,
@@ -85,6 +85,9 @@ async def main(task_queue: str = DEFAULT_TASK_QUEUE) -> None:
         # Best-effort: close the worker-process asyncpg pool that
         # activities lazily built. Failures are logged inside.
         await _pool.close_pool()
+        # Same pattern for the process-lifetime httpx client used by
+        # heartbeat (and future K3+ activity HTTP calls).
+        await _http.close_http_client()
         logger.info("worker stopped")
 
 
