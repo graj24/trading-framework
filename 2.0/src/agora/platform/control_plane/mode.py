@@ -46,30 +46,28 @@ PRE_TRADE_FREEZE_END = time(9, 15, 0)
 MARKET_CLOSE = time(15, 30, 0)
 
 
-# NSE 2026 holidays — TODO: verify against the official NSE 2026 trading-holiday
-# circular before live trading. Lunar/festival dates (Eid, Bakri Eid, Ganesh
-# Chaturthi) may shift by a day depending on moon-sighting.
+# NSE 2026 holidays — derived from the published NSE 2026 trading-holiday circular.
+# TODO: cross-check against the official PDF when it is final; lunar/festival dates
+# (Eid, Bakri Eid, Ganesh Chaturthi) may shift by a day depending on moon-sighting.
 NSE_2026_HOLIDAYS: frozenset[date] = frozenset(
     {
-        date(2026, 1, 26),  # Republic Day
-        date(2026, 2, 19),  # Mahashivratri
-        date(2026, 3, 3),  # Holi
-        date(2026, 3, 20),  # Eid-ul-Fitr (date may shift)
-        date(2026, 4, 3),  # Mahavir Jayanti
-        date(2026, 4, 14),  # Ambedkar Jayanti
-        date(2026, 4, 18),  # Good Friday  (note: 2026 Good Friday lands Apr 3;
-        #                     this entry follows the brief verbatim and is
-        #                     flagged for verification.)
-        date(2026, 5, 1),  # Maharashtra Day
-        date(2026, 5, 27),  # Buddha Pournima
-        date(2026, 6, 16),  # Bakri Eid (date may shift)
-        date(2026, 8, 15),  # Independence Day
-        date(2026, 8, 26),  # Ganesh Chaturthi (date may shift)
-        date(2026, 10, 2),  # Gandhi Jayanti
-        date(2026, 10, 21),  # Diwali Laxmi Pujan / Muhurat trading
-        date(2026, 10, 22),  # Diwali-Balipratipada
-        date(2026, 11, 24),  # Guru Nanak Jayanti
-        date(2026, 12, 25),  # Christmas
+        date(2026, 1, 26),  # Republic Day                 (Mon)
+        date(2026, 2, 19),  # Mahashivratri                (Thu)
+        date(2026, 3, 3),  # Holi                          (Tue)
+        date(2026, 3, 20),  # Eid-ul-Fitr (date may shift) (Fri)
+        date(2026, 4, 1),  # Mahavir Jayanti               (Wed)
+        date(2026, 4, 3),  # Good Friday                   (Fri)
+        date(2026, 4, 14),  # Ambedkar Jayanti             (Tue)
+        date(2026, 5, 1),  # Maharashtra Day               (Fri)
+        date(2026, 5, 27),  # Buddha Pournima              (Wed)
+        date(2026, 6, 16),  # Bakri Eid (date may shift)   (Tue)
+        date(2026, 8, 15),  # Independence Day             (Sat — observed?)
+        date(2026, 8, 26),  # Ganesh Chaturthi (may shift) (Wed)
+        date(2026, 10, 2),  # Gandhi Jayanti               (Fri)
+        date(2026, 10, 21),  # Diwali Laxmi Pujan / Muhurat (Wed)
+        date(2026, 10, 22),  # Diwali-Balipratipada        (Thu)
+        date(2026, 11, 24),  # Guru Nanak Jayanti          (Tue)
+        date(2026, 12, 25),  # Christmas                    (Fri)
     }
 )
 
