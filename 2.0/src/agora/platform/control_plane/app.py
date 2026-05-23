@@ -34,7 +34,14 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -106,6 +113,18 @@ class PMStateChangeResponse(BaseModel):
 
     pm_id: str
     status: str
+
+
+class JournalResponse(BaseModel):
+    """Body of ``GET /api/pms/{id}/journal``.
+
+    ``lines`` is ordered oldest-first, matching how the heartbeat
+    activity appends. The dashboard reverses for "newest-first" if
+    desired.
+    """
+
+    pm_id: str
+    lines: list[str]
 
 
 class ModeTransition(BaseModel):
@@ -181,6 +200,24 @@ def _build_router(settings: Settings) -> APIRouter:
         if record is None:
             raise HTTPException(status_code=404, detail=f"pm {pm_id!r} not found")
         return record
+
+    @router.get("/pms/{pm_id}/journal", response_model=JournalResponse)
+    async def get_pm_journal(
+        pm_id: str,
+        request: Request,
+        # Cap at 500 to avoid a DOS via huge query strings; default 50
+        # matches the "last 50 entries" line in plan §4 Step 2.4.
+        lines: int = Query(50, ge=1, le=500),
+    ) -> JournalResponse:
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        pm = await pm_repo.get_pm(state.postgres_pool, pm_id)
+        if pm is None:
+            raise HTTPException(status_code=404, detail=f"pm {pm_id!r} not found")
+        workspace_root = pm_provision.resolve_workspace_root(state.settings)
+        journal_lines = pm_provision.read_journal_tail(workspace_root / pm_id, lines=lines)
+        return JournalResponse(pm_id=pm_id, lines=journal_lines)
 
     @router.post("/pms/spawn", response_model=SpawnPMResponse)
     async def spawn_pm(req: SpawnPMRequest, request: Request) -> SpawnPMResponse:

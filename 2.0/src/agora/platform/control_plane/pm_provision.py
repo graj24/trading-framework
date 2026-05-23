@@ -140,4 +140,25 @@ async def provision_workspace(
     return pm_dir
 
 
-__all__ = ["provision_workspace", "resolve_workspace_root"]
+def read_journal_tail(pm_workspace_root: Path, *, lines: int = 50) -> list[str]:
+    """Return the last ``lines`` entries of *today's* journal for one PM.
+
+    Returns ``[]`` if today's journal file doesn't exist yet (PM hasn't
+    logged anything since UTC midnight) or the workspace itself is
+    missing. The caller — the dashboard journal endpoint — treats the
+    empty case as "nothing to show", not as an error.
+
+    The "today" boundary follows the rule used by the heartbeat
+    activity (``YYYY-MM-DD`` in UTC); they must agree or the dashboard
+    will look at the wrong file across the midnight roll-over.
+    """
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    journal_path = pm_workspace_root / "journals" / f"{today}.md"
+    if not journal_path.exists():
+        return []
+    text = journal_path.read_text(encoding="utf-8")
+    all_lines = text.splitlines()
+    return all_lines[-lines:] if len(all_lines) > lines else all_lines
+
+
+__all__ = ["provision_workspace", "read_journal_tail", "resolve_workspace_root"]

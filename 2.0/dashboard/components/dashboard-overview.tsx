@@ -11,6 +11,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Circle } from "lucide-react";
+import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -188,11 +189,16 @@ function PMsCard({
               : (
                   <ul className="space-y-1">
                     {pms!.map((pm) => (
-                      <li key={pm.id} className="flex justify-between">
-                        <span className="font-medium text-foreground">
-                          {pm.name}
-                        </span>
-                        <span>{pm.status}</span>
+                      <li key={pm.id}>
+                        <Link
+                          href={`/pms/${encodeURIComponent(pm.id)}`}
+                          className="-mx-2 flex justify-between rounded-md px-2 py-1 hover:bg-muted"
+                        >
+                          <span className="font-medium text-foreground">
+                            {pm.name}
+                          </span>
+                          <span>{pm.status}</span>
+                        </Link>
                       </li>
                     ))}
                   </ul>

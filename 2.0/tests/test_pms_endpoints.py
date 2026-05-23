@@ -590,3 +590,62 @@ def test_state_change_endpoints_503_when_temporal_is_none(
     assert "temporal" in r_stop.json()["detail"].lower()
     assert r_pause.status_code == 503
     assert r_resume.status_code == 503
+
+
+# ----------------------------------------------------------------- journal
+# Step 2.4 — GET /api/pms/{id}/journal. PM repo is stubbed (DB-free), the
+# workspace lives under tmp_path so we exercise read_journal_tail end-to-end.
+
+
+def _today_journal(workspace_root: Path, pm_id: str) -> Path:
+    """Return the path to today's journal file (UTC). Helper for the tests
+    below — must agree with read_journal_tail's date selection."""
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    return workspace_root / pm_id / "journals" / f"{today}.md"
+
+
+def test_get_journal_404_when_pm_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_repo(monkeypatch, get_record=None)
+    r = client.get("/api/pms/missing/journal")
+    assert r.status_code == 404
+
+
+def test_get_journal_returns_empty_when_no_journal_file(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """PM exists in DB but the journal file hasn't been created yet."""
+    _stub_repo(monkeypatch, get_record=_make_pm_record())
+    # Journal directory absent — read_journal_tail must return [] cleanly.
+    r = client.get("/api/pms/pm1/journal")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"pm_id": "pm1", "lines": []}
+
+
+def test_get_journal_returns_tail(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Write 100 lines, request the last 10."""
+    _stub_repo(monkeypatch, get_record=_make_pm_record())
+    journal = _today_journal(tmp_path, "pm1")
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text("".join(f"line {i}\n" for i in range(100)), encoding="utf-8")
+
+    r = client.get("/api/pms/pm1/journal", params={"lines": 10})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pm_id"] == "pm1"
+    assert body["lines"] == [f"line {i}" for i in range(90, 100)]
+
+
+def test_get_journal_caps_at_500(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """lines=10000 must be rejected with 422 before any I/O happens."""
+    _stub_repo(monkeypatch, get_record=_make_pm_record())
+    r = client.get("/api/pms/pm1/journal", params={"lines": 10000})
+    assert r.status_code == 422
