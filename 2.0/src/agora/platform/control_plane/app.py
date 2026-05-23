@@ -8,6 +8,9 @@ Endpoints:
   GET /api/mode    — current AGORA operating mode (build / trading / freeze).
 
 Cross-cutting:
+  - Lifespan-scoped resources (Postgres pool, Temporal client, Langfuse SDK,
+    shared httpx client) live on ``app.state.agora`` and are reused across
+    requests. Built once at startup, torn down on shutdown.
   - X-Request-ID middleware: pulls header or generates a UUID4, binds it onto
     loguru's contextualize() so every log line for that request carries it.
   - CORS for http://localhost:3000 (the dashboard).
@@ -16,8 +19,10 @@ Cross-cutting:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +32,11 @@ from loguru import logger
 from pydantic import BaseModel
 
 from agora.platform.control_plane import health
+from agora.platform.control_plane.state import (
+    AppState,
+    build_app_state,
+    teardown_app_state,
+)
 from agora.platform.observability.logging import configure_logging
 from agora.platform.shared.settings import Settings, get_settings
 
@@ -70,24 +80,30 @@ def _aggregate_status(services: dict[str, ServiceHealth]) -> health.Status:
     return inverse[worst]  # type: ignore[return-value]
 
 
+def _get_state(request: Request) -> AppState:
+    """Pull the lifespan-scoped resources off the app."""
+    state: AppState = request.app.state.agora
+    return state
+
+
 def _build_router(settings: Settings) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/health", response_model=HealthResponse)
-    async def get_health() -> HealthResponse:
+    async def get_health(request: Request) -> HealthResponse:
+        state = _get_state(request)
         # Run pings concurrently — each has its own 2s timeout.
-        import asyncio
-
         results = await asyncio.gather(
-            health.ping_postgres(settings.postgres_url),
-            health.ping_temporal(settings.temporal_host),
+            health.ping_postgres(state.postgres_pool),
+            health.ping_temporal(state.temporal_client, settings.temporal_namespace),
             health.ping_langfuse(
+                state.langfuse,
                 settings.langfuse_host,
-                settings.langfuse_public_key,
-                settings.langfuse_secret_key,
+                public_key=settings.langfuse_public_key,
+                secret_key=settings.langfuse_secret_key,
             ),
-            health.ping_letta(settings.letta_host),
-            health.ping_qdrant(settings.qdrant_host),
+            health.ping_letta(settings.letta_host, state.http_client),
+            health.ping_qdrant(settings.qdrant_host, state.http_client),
             return_exceptions=False,
         )
         names = ["postgres", "temporal", "langfuse", "letta", "qdrant"]
@@ -98,28 +114,20 @@ def _build_router(settings: Settings) -> APIRouter:
         return HealthResponse(status=_aggregate_status(services), services=services)
 
     @router.get("/pms", response_model=list[PMSummary])
-    async def list_pms() -> list[PMSummary]:
-        # K1: schema exists, no rows. The query goes through asyncpg directly
-        # to avoid pulling SQLAlchemy session machinery into the control plane
-        # before there's a real model.
-        import asyncpg
-
-        bare_url = settings.postgres_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-        try:
-            conn = await asyncpg.connect(bare_url)
-        except Exception as e:
-            logger.warning("list_pms could not connect to postgres: {}", e)
+    async def list_pms(request: Request) -> list[PMSummary]:
+        # K1: schema exists, no rows. The query goes through the shared
+        # asyncpg pool to avoid pulling SQLAlchemy session machinery into the
+        # control plane before there's a real model.
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            logger.warning("list_pms: postgres pool unavailable; returning []")
             return []
-        try:
+        async with state.postgres_pool.acquire() as conn:
             rows = await conn.fetch("SELECT id, name, status FROM pms ORDER BY spawned_at")
-        finally:
-            await conn.close()
         return [PMSummary(id=r["id"], name=r["name"], status=r["status"]) for r in rows]
 
     @router.get("/mode", response_model=ModeResponse)
-    async def get_mode() -> ModeResponse:
-        # K1.4: returns 'build' as a placeholder. K1.5 wires this to the real
-        # mode controller in agora.platform.control_plane.mode.
+    async def get_mode(request: Request) -> ModeResponse:
         from agora.platform.control_plane import mode as mode_module
 
         now = datetime.now(UTC)
@@ -153,6 +161,30 @@ def _make_request_id_middleware() -> (
     return middleware
 
 
+def _make_lifespan(
+    settings: Settings,
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    """Build the FastAPI lifespan that owns the AppState singletons."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        state = await build_app_state(settings)
+        app.state.agora = state
+        logger.info(
+            "AGORA control plane resources built " "(postgres={pg} temporal={tc} langfuse={lf})",
+            pg="ok" if state.postgres_pool is not None else "down",
+            tc="ok" if state.temporal_client is not None else "down",
+            lf="ok" if state.langfuse is not None else "off",
+        )
+        try:
+            yield
+        finally:
+            await teardown_app_state(state)
+            logger.info("AGORA control plane resources released")
+
+    return lifespan
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_format)
@@ -161,6 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="AGORA Control Plane",
         version="0.0.1",
         description="Platform control plane for AGORA. See plan/00-FRAMEWORK.md.",
+        lifespan=_make_lifespan(settings),
     )
     app.add_middleware(
         CORSMiddleware,
