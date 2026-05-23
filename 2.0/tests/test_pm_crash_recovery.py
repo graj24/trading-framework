@@ -275,6 +275,20 @@ async def test_workflow_survives_worker_crash(
     test_pm_id = f"crash_{uuid.uuid4().hex[:8]}"
     test_workflow_id = f"pm-{test_pm_id}"
 
+    # ----- 0) Pre-write the PM workspace's config.yaml so the
+    # workflow sees the test cadence (CYCLE_SECONDS) instead of the
+    # provisioner's 60s default. The provisioner is idempotent —
+    # it leaves config.yaml alone if it already exists. Without
+    # this, post-audit/k2-3 made YAML the source of truth for
+    # cadence, so the workflow would tick every 60s and the test
+    # budget would expire before any heartbeat landed.
+    pm_workspace = workspace_root / test_pm_id
+    pm_workspace.mkdir(parents=True, exist_ok=True)
+    (pm_workspace / "config.yaml").write_text(
+        f"build_cycle_seconds: {CYCLE_SECONDS}\n" f"trading_cycle_seconds: {CYCLE_SECONDS}\n",
+        encoding="utf-8",
+    )
+
     # ----- 1) Insert the pms row that mark_pm_running will UPDATE.
     # The supervisor doesn't insert; it expects the row to already exist
     # (the API path inserts on POST /api/pms). For this test we go around

@@ -37,6 +37,7 @@ from agora.platform.workers.pm_supervisor import (
     PMConfig,
     PMSupervisor,
     ProvisionInput,
+    ProvisionResult,
 )
 
 pytestmark = pytest.mark.integration
@@ -62,9 +63,13 @@ def _make_mock_activities(
     """
 
     @activity.defn(name="provision_pm_workspace")
-    async def mock_provision(payload: ProvisionInput) -> str:
+    async def mock_provision(payload: ProvisionInput) -> ProvisionResult:
         calls.append(("provision", payload.pm_id))
-        return f"/tmp/{payload.pm_id}"
+        return ProvisionResult(
+            workspace_path=f"/tmp/{payload.pm_id}",
+            build_cycle_seconds=5,
+            trading_cycle_seconds=5,
+        )
 
     @activity.defn(name="mark_pm_running")
     async def mock_running(pm_id: str) -> None:

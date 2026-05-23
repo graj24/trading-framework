@@ -24,6 +24,10 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+import yaml
+from loguru import logger
 
 from agora.platform.shared.settings import Settings, get_settings
 
@@ -69,13 +73,18 @@ def _seed_config_yaml(
 ) -> str:
     """Render the seed config.yaml content. Plain string formatting —
     pyyaml is a project dep but the seed has no nested structures and
-    introducing yaml-dump indeterminacy here would obscure diffs."""
+    introducing yaml-dump indeterminacy here would obscure diffs.
+
+    Cadence keys (``build_cycle_seconds`` / ``trading_cycle_seconds``)
+    match the dataclass field names so :func:`load_pm_config` can
+    pass the parsed dict straight into ``PMConfig`` overrides.
+    """
     return (
         "# Generated at spawn. The PM may overwrite this in K4+ (Reflection).\n"
         f"name: {name}\n"
         f"spawned_at: {spawned_at.isoformat()}\n"
         f"starting_capital_inr: {starting_capital_inr}\n"
-        "build_cycle_minutes: 60\n"
+        "build_cycle_seconds: 60\n"
         "trading_cycle_seconds: 60\n"
         "daily_budget_usd_build: 20.0\n"
         "daily_budget_usd_trading: 5.0\n"
@@ -140,6 +149,31 @@ async def provision_workspace(
     return pm_dir
 
 
+def load_pm_config(pm_workspace: Path) -> dict[str, Any]:
+    """Read ``config.yaml`` from the PM workspace.
+
+    Returns ``{}`` if the file is missing or malformed so callers can
+    fall back to dataclass defaults. Logs a warning on parse error —
+    we don't want an operator typo in YAML to fail-stop the workflow.
+
+    Closes the source-of-truth drift between the seed YAML and
+    ``PMConfig``: K2 wrote the seed at provision time but never read
+    it back. The provision activity now calls this helper and pipes
+    the cadence values into the workflow's sleep durations so operator
+    edits to ``config.yaml`` take effect on the next workflow restart.
+    """
+    config_file = pm_workspace / "config.yaml"
+    if not config_file.exists():
+        return {}
+    try:
+        parsed = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        # Bad YAML: log + ignore. Don't fail the workflow on operator typos.
+        logger.warning("load_pm_config: failed to parse {}: {}", config_file, e)
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def read_journal_tail(pm_workspace_root: Path, *, lines: int = 50) -> list[str]:
     """Return the last ``lines`` entries of *today's* journal for one PM.
 
@@ -161,4 +195,4 @@ def read_journal_tail(pm_workspace_root: Path, *, lines: int = 50) -> list[str]:
     return all_lines[-lines:] if len(all_lines) > lines else all_lines
 
 
-__all__ = ["provision_workspace", "read_journal_tail", "resolve_workspace_root"]
+__all__ = ["load_pm_config", "provision_workspace", "read_journal_tail", "resolve_workspace_root"]

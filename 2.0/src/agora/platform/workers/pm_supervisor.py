@@ -73,6 +73,21 @@ class ProvisionInput:
 
 
 @dataclass
+class ProvisionResult:
+    """Return shape of the provision activity.
+
+    The workflow can't read files (sandbox), so the provision activity
+    loads ``config.yaml`` and hands the cadence values back to the
+    workflow as plain ints. Operator edits to YAML take effect on the
+    next workflow restart, which is what the file's existence implied.
+    """
+
+    workspace_path: str
+    build_cycle_seconds: int
+    trading_cycle_seconds: int
+
+
+@dataclass
 class HeartbeatInput:
     """Args for the heartbeat activity."""
 
@@ -87,20 +102,46 @@ class HeartbeatInput:
 
 
 @activity.defn(name="provision_pm_workspace")
-async def provision_pm_workspace(payload: ProvisionInput) -> str:
-    """Idempotently (re-)create the PM's workspace tree. Returns the path.
+async def provision_pm_workspace(payload: ProvisionInput) -> ProvisionResult:
+    """Idempotently (re-)create the PM's workspace tree.
 
+    Returns the resolved workspace path along with the cadence values
+    loaded from the workspace's ``config.yaml`` (falling back to
+    PMConfig defaults if the file is missing a key or malformed).
     Runs on every workflow start (including replays). The provisioner
     is mkdir-p + write-if-absent under the hood, so repeats are safe.
     """
-    from agora.platform.control_plane.pm_provision import provision_workspace
+    from agora.platform.control_plane.pm_provision import (
+        load_pm_config,
+        provision_workspace,
+    )
 
     pm_dir = await provision_workspace(
         pm_id=payload.pm_id,
         name=payload.name,
         starting_capital_inr=payload.starting_capital_inr,
     )
-    return str(pm_dir)
+    cfg = load_pm_config(pm_dir)
+    # PMConfig defaults — keep these in sync with the dataclass below.
+    # We don't import PMConfig() defaults here because that would
+    # introduce a top-of-module workflow-side dependency cycle.
+    build_default = 60
+    trading_default = 60
+
+    def _coerce_int(value: object, fallback: int) -> int:
+        """YAML can return ``int`` directly. Anything else (str, float,
+        None, list) falls back to the dataclass default — we don't try
+        to be clever about coercion; an operator who wants seconds
+        should write seconds."""
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return fallback
+
+    return ProvisionResult(
+        workspace_path=str(pm_dir),
+        build_cycle_seconds=_coerce_int(cfg.get("build_cycle_seconds"), build_default),
+        trading_cycle_seconds=_coerce_int(cfg.get("trading_cycle_seconds"), trading_default),
+    )
 
 
 @activity.defn(name="mark_pm_running")
@@ -243,7 +284,18 @@ class PMSupervisor:
         # 1) Idempotent provision. Important: this runs on every workflow
         #    start (and replay). The activity must not clobber agent
         #    state; see pm_provision.provision_workspace.
-        await workflow.execute_activity(
+        #
+        #    The activity also reads ``config.yaml`` (workflow code
+        #    cannot — file I/O isn't allowed in the sandbox) and hands
+        #    back the cadence values, so operator edits to YAML take
+        #    effect on the next workflow restart. The values fall back
+        #    to ``PMConfig`` defaults if the file is missing a key.
+        #    Precedence: YAML on disk > PMConfig defaults. The spawn
+        #    endpoint doesn't pass cadence overrides, so production
+        #    sees YAML cadence; tests that need a non-default cadence
+        #    pre-write ``config.yaml`` (the idempotent provisioner
+        #    leaves it alone).
+        provisioned = await workflow.execute_activity(
             provision_pm_workspace,
             ProvisionInput(
                 pm_id=config.pm_id,
@@ -252,6 +304,8 @@ class PMSupervisor:
             ),
             start_to_close_timeout=timedelta(seconds=10),
         )
+        build_cycle_seconds = provisioned.build_cycle_seconds
+        trading_cycle_seconds = provisioned.trading_cycle_seconds
 
         # 2) DB transition: spawned -> running.
         await workflow.execute_activity(
@@ -294,12 +348,9 @@ class PMSupervisor:
 
                 # Mode-aware cadence. Both default to 60s in K2 (per plan
                 # §4 DoD #3); K3 may diverge. Choosing duration in the
-                # workflow keeps replay deterministic.
-                cycle_seconds = (
-                    config.trading_cycle_seconds
-                    if mode == "trading"
-                    else config.build_cycle_seconds
-                )
+                # workflow keeps replay deterministic. Values come from
+                # the provision activity (loaded from config.yaml).
+                cycle_seconds = trading_cycle_seconds if mode == "trading" else build_cycle_seconds
                 await workflow.sleep(timedelta(seconds=cycle_seconds))
         finally:
             # Always run the stopped marker, even on cancellation. The
@@ -317,6 +368,7 @@ __all__ = [
     "PMConfig",
     "PMSupervisor",
     "ProvisionInput",
+    "ProvisionResult",
     "get_current_mode",
     "heartbeat_journal",
     "mark_pm_running",
