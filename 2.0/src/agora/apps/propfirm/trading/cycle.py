@@ -28,10 +28,12 @@ trading smoke (3.1) and the backtest harness (3.3).
 
 Outcome vocabulary
 ------------------
-Signal-reversal exits are recorded as ``'manual'`` since the schema's
-:data:`agora.platform.control_plane.trade_repo.TradeOutcome` literal
-set has no natural ``'signal_exit'`` bucket. K3 audit will decide
-whether to extend the vocabulary in a follow-up migration.
+Signal-reversal exits land in :data:`TradeOutcome` ``'signal_exit'``
+(added in the K3 post-audit pass). Operator-initiated closes use
+``'manual'``; mixing the two would muddy K4+ exit-reason analytics.
+The literal set is enforced in Python only — the ``outcome`` column
+is plain TEXT in Postgres (migration ``0003``), so adding a value is a
+one-line change with no migration.
 """
 
 from __future__ import annotations
@@ -319,10 +321,11 @@ async def run_trading_cycle(
                 existing.id,
                 exit_price=signal.price,
                 exit_ts=datetime.now(UTC),
-                # Outcome vocabulary doesn't have 'signal_exit' — see
-                # module docstring. K3 audit will decide whether to
-                # extend the literal set in a follow-up migration.
-                outcome="manual",
+                # 'signal_exit' bucket (K3 post-audit). Distinct from
+                # operator-initiated 'manual' closes so K4+ PM
+                # reasoning over exit reasons isn't ambiguous. See
+                # module docstring + trade_repo.TradeOutcome.
+                outcome="signal_exit",
             )
         except ValueError as e:
             _journal_reject(pm_id, symbol, f"close_trade refused: {e}")

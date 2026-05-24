@@ -5,14 +5,16 @@ Revises: 0002_pm_workflow_id
 Create Date: 2026-01-15 00:00:00
 
 K3 Step 3.4 schema per plan/01-KEYSTONE.md §5. Open trades carry
-``outcome='open'``; the broker / EOD closer transitions them to one of
-``sl_hit``, ``target_hit``, ``eod_close``, ``manual`` on close.
+``outcome='open'``; the broker / EOD closer / strategy / operator
+transitions them to one of ``sl_hit``, ``target_hit``, ``eod_close``,
+``manual``, ``signal_exit`` on close.
 
 The vocabulary is enforced in Python via :data:`agora.platform.control_plane.trade_repo.TradeOutcome`
 (a ``Literal``). We deliberately keep the column as plain ``TEXT`` for
-K3 — adding a CHECK constraint here would mean a follow-up migration to
-extend the vocabulary if K8 introduces new outcome states. K8 hardening
-can layer the CHECK in once the set is frozen.
+K3 — adding a CHECK constraint here would mean a follow-up migration
+every time the vocabulary grows (``signal_exit`` was added in the K3
+post-audit pass without a schema migration; that is the point). K8
+hardening can layer the CHECK in once the set is frozen.
 
 Indexes: a plain index on ``pm_id`` (for the dashboard's PM-positions
 card) plus a composite ``(pm_id, outcome)`` for the K7 leaderboard

@@ -336,9 +336,9 @@ async def test_closes_position_on_exit_signal(
 ) -> None:
     """Up-then-down regime + open trade → close_trade is called.
 
-    Outcome must be ``'manual'`` per the K3.5 vocabulary mapping note
-    (signal-reversal exits don't fit the existing literal set; see
-    cycle.py docstring).
+    Outcome must be ``'signal_exit'`` (K3 post-audit) — strategy-
+    driven exits get their own bucket so K4+ PM analytics can
+    separate them from operator-initiated ``'manual'`` closes.
     """
     uptrend = [100.0 + i * 1.0 for i in range(60)]
     downtrend = [uptrend[-1] - i * 2.5 for i in range(80)]
@@ -358,7 +358,7 @@ async def test_closes_position_on_exit_signal(
     assert len(patched_repos["close_calls"]) == 1
     close_args = patched_repos["close_calls"][0]
     assert close_args["trade_id"] == 77
-    assert close_args["outcome"] == "manual"
+    assert close_args["outcome"] == "signal_exit"
     assert close_args["exit_price"] == Decimal(str(closes[-1]))
 
 

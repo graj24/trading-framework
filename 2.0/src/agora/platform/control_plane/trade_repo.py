@@ -22,8 +22,15 @@ from pydantic import BaseModel, ConfigDict
 
 #: Trade lifecycle. ``open`` is the only non-terminal state — the
 #: broker writes that on submit, the EOD closer / SL handler / manual
-#: action moves it to one of the four terminal states.
-TradeOutcome = Literal["open", "sl_hit", "target_hit", "eod_close", "manual"]
+#: action / strategy signal-reversal moves it to one of the five
+#: terminal states. The column is plain TEXT in Postgres (see
+#: migration 0003); the literal here is the only enforcement, which
+#: lets the vocabulary grow without a schema migration. ``signal_exit``
+#: was added in the K3 post-audit pass to give strategy-driven closes
+#: their own bucket; conflating them with operator ``manual`` closes
+#: confuses K4+ PM exit-reason analytics. K8 hardening can layer a
+#: CHECK constraint once the set is frozen.
+TradeOutcome = Literal["open", "sl_hit", "target_hit", "eod_close", "manual", "signal_exit"]
 
 #: Order side. K3 strategy is long-only; ``SHORT`` is included so the
 #: schema doesn't need a follow-up migration when K4+ strategies trade
