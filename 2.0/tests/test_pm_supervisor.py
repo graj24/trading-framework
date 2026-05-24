@@ -33,11 +33,16 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from agora.platform.workers.pm_supervisor import (
+    EodCloseInput,
+    EodCloseOutput,
+    EodCloser,
     HeartbeatInput,
     PMConfig,
     PMSupervisor,
     ProvisionInput,
     ProvisionResult,
+    TradingCycleInput,
+    TradingCycleOutput,
 )
 
 pytestmark = pytest.mark.integration
@@ -88,12 +93,18 @@ def _make_mock_activities(
     async def mock_heartbeat(payload: HeartbeatInput) -> None:
         calls.append(("heartbeat", payload.mode))
 
+    @activity.defn(name="trading_cycle")
+    async def mock_trading_cycle(payload: TradingCycleInput) -> TradingCycleOutput:
+        calls.append(("trading_cycle", payload.pm_id))
+        return TradingCycleOutput(placed=[], closed=[], skipped=[], rejected=[])
+
     return [
         mock_provision,
         mock_running,
         mock_stopped,
         mock_get_mode,
         mock_heartbeat,
+        mock_trading_cycle,
     ]
 
 
@@ -236,3 +247,205 @@ async def test_supervisor_pause_skips_heartbeats_then_resumes() -> None:
 
     # Sanity: the stopped marker ran on graceful exit.
     assert any(c[0] == "stopped" for c in calls), calls
+
+
+async def test_supervisor_runs_trading_cycle_when_mode_is_trading() -> None:
+    """In trading mode the workflow invokes ``trading_cycle``, not heartbeat.
+
+    Audit-style behavioural assertion for K3 Step 3.5: the workflow's
+    branch predicate (``if mode == "trading"``) must dispatch the
+    cycle activity, and the heartbeat activity must NOT run on the
+    same iteration. Both branches running would mean trading cycles
+    and "alive" ticks racing each other in the journal.
+    """
+    try:
+        env = await _start_env()
+    except Exception as e:
+        pytest.skip(f"Temporal test server unavailable: {e}")
+
+    calls: list[tuple[str, Any]] = []
+    activities = _make_mock_activities(calls, mode="trading")
+    task_queue = f"test-supervisor-{uuid.uuid4()}"
+
+    async with (
+        env,
+        Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[PMSupervisor],
+            activities=activities,
+        ),
+    ):
+        config = PMConfig(
+            pm_id="pm1",
+            name="PM1",
+            starting_capital_inr=1_000_000.0,
+            build_cycle_seconds=5,
+            trading_cycle_seconds=5,
+        )
+        handle = await env.client.start_workflow(
+            PMSupervisor.run,
+            config,
+            id=f"pm-test-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+        # Wait for at least one trading cycle to land.
+        for _ in range(50):
+            if any(c[0] == "trading_cycle" for c in calls):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail(f"no trading cycle observed within budget; calls={calls}")
+
+        await handle.signal(PMSupervisor.stop)
+        await handle.result()
+
+    assert ("trading_cycle", "pm1") in calls
+    # Heartbeat must not fire in trading mode — that branch is the
+    # build-mode placeholder.
+    assert all(
+        c[0] != "heartbeat" for c in calls
+    ), f"heartbeat fired in trading mode; calls={calls}"
+
+
+async def test_supervisor_runs_heartbeat_when_mode_is_build() -> None:
+    """In build mode the workflow invokes ``heartbeat``, not the trading cycle.
+
+    Mirror of the trading test above — pins the other side of the
+    branch predicate. K2 behaviour preserved.
+    """
+    try:
+        env = await _start_env()
+    except Exception as e:
+        pytest.skip(f"Temporal test server unavailable: {e}")
+
+    calls: list[tuple[str, Any]] = []
+    activities = _make_mock_activities(calls, mode="build")
+    task_queue = f"test-supervisor-{uuid.uuid4()}"
+
+    async with (
+        env,
+        Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[PMSupervisor],
+            activities=activities,
+        ),
+    ):
+        config = PMConfig(
+            pm_id="pm1",
+            name="PM1",
+            starting_capital_inr=1_000_000.0,
+            build_cycle_seconds=5,
+            trading_cycle_seconds=5,
+        )
+        handle = await env.client.start_workflow(
+            PMSupervisor.run,
+            config,
+            id=f"pm-test-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+
+        for _ in range(50):
+            if any(c[0] == "heartbeat" for c in calls):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail(f"no heartbeat observed within budget; calls={calls}")
+
+        await handle.signal(PMSupervisor.stop)
+        await handle.result()
+
+    assert ("heartbeat", "build") in calls
+    # Trading cycle must not fire in build mode — that's the K3.5
+    # property the audit test above pins from the other side.
+    assert all(
+        c[0] != "trading_cycle" for c in calls
+    ), f"trading_cycle fired in build mode; calls={calls}"
+
+
+# ------------------------------------------------------ EOD closer (Step 3.6)
+# The EodCloser workflow lists running PMs via ``list_running_pms_activity``
+# then drives ``eod_close_activity`` per-PM. Tests stub both activities and
+# assert the call shape: list_running_pms fires once, eod_close fires per id.
+
+
+async def test_eod_closer_runs_one_close_per_running_pm() -> None:
+    """list_running_pms -> eod_close per id, sequential."""
+    try:
+        env = await _start_env()
+    except Exception as e:
+        pytest.skip(f"Temporal test server unavailable: {e}")
+
+    calls: list[tuple[str, Any]] = []
+
+    @activity.defn(name="list_running_pms")
+    async def mock_list_running_pms() -> list[str]:
+        calls.append(("list_running_pms", None))
+        return ["pm1", "pm2"]
+
+    @activity.defn(name="eod_close")
+    async def mock_eod_close(payload: EodCloseInput) -> EodCloseOutput:
+        calls.append(("eod_close", payload.pm_id))
+        return EodCloseOutput(closed=[1], skipped=[])
+
+    task_queue = f"test-eod-{uuid.uuid4()}"
+
+    async with (
+        env,
+        Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[EodCloser],
+            activities=[mock_list_running_pms, mock_eod_close],
+        ),
+    ):
+        handle = await env.client.start_workflow(
+            EodCloser.run,
+            id=f"eod-test-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        await handle.result()
+
+    # list_running_pms fires exactly once.
+    assert [c for c in calls if c[0] == "list_running_pms"] == [("list_running_pms", None)]
+    # eod_close fires once per running PM in the order returned.
+    eod_calls = [c for c in calls if c[0] == "eod_close"]
+    assert eod_calls == [("eod_close", "pm1"), ("eod_close", "pm2")]
+
+
+async def test_eod_close_activity_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The activity body delegates to ``close_positions_for_pm``.
+
+    Tests the ``@activity.defn`` body directly (no workflow harness)
+    so the dispatch is the only thing under test. The pool builder
+    and the closer are stubbed; the activity must call the closer
+    once with the payload's ``pm_id`` and shape the result correctly.
+    """
+    from agora.apps.propfirm.trading.eod import EodCloseResult
+    from agora.platform.workers import _pool, pm_supervisor
+
+    pool_calls: list[Any] = []
+    closer_calls: list[str] = []
+
+    async def fake_pool() -> Any:
+        pool_calls.append("pool")
+        return object()
+
+    async def fake_closer(_pool: Any, pm_id: str, **_: Any) -> EodCloseResult:
+        closer_calls.append(pm_id)
+        return EodCloseResult(pm_id=pm_id, closed=[7, 8], skipped=["FOO: gone"])
+
+    monkeypatch.setattr(_pool, "get_or_build_pool", fake_pool)
+    # The activity imports the closer lazily inside the body; patch the
+    # module attribute the body resolves to.
+    import agora.apps.propfirm.trading.eod as eod_module
+
+    monkeypatch.setattr(eod_module, "close_positions_for_pm", fake_closer)
+
+    out = await pm_supervisor.eod_close_activity(EodCloseInput(pm_id="pm1"))
+
+    assert pool_calls == ["pool"]
+    assert closer_calls == ["pm1"]
+    assert out == EodCloseOutput(closed=[7, 8], skipped=["FOO: gone"])

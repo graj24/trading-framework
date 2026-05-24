@@ -59,9 +59,37 @@ export type JournalResponse = {
   lines: string[];
 };
 
+// Mirrors PaperTradeRecord in src/agora/platform/control_plane/trade_repo.py.
+// Decimal columns serialise as JSON strings (asyncpg/Pydantic preserve precision);
+// the dashboard formats them via Intl.NumberFormat. Timestamps are ISO 8601 strings.
+export type PaperTrade = {
+  id: number;
+  pm_id: string;
+  symbol: string;
+  side: "LONG" | "SHORT";
+  quantity: number;
+  entry_price: string | null;
+  entry_ts: string | null;
+  stop_loss: string | null;
+  target: string | null;
+  exit_price: string | null;
+  exit_ts: string | null;
+  outcome: "open" | "sl_hit" | "target_hit" | "eod_close" | "manual";
+  pnl_inr: string | null;
+  pnl_pct: string | null;
+  strategy_id: string | null;
+  metadata: Record<string, unknown>;
+};
+
 export type PMStateChangeResponse = {
   pm_id: string;
   status: string;
+};
+
+export type KillSwitchStatus = {
+  active: boolean;
+  activated_at: string | null;
+  reason: string | null;
 };
 
 class ApiError extends Error {
@@ -103,6 +131,29 @@ async function postJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function postJSONBody<T>(
+  path: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<T> {
+  // Variant of postJSON that sends a JSON body. Used by the kill
+  // switch activate endpoint, which requires a reason.
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new ApiError(`POST ${path} -> ${res.status}`, res.status);
+  }
+  return (await res.json()) as T;
+}
+
 export function fetchHealth(signal?: AbortSignal): Promise<HealthResponse> {
   return getJSON<HealthResponse>("/api/health", signal);
 }
@@ -130,6 +181,17 @@ export function fetchJournal(
   );
 }
 
+export function fetchTrades(
+  id: string,
+  limit = 100,
+  signal?: AbortSignal,
+): Promise<PaperTrade[]> {
+  return getJSON<PaperTrade[]>(
+    `/api/pms/${encodeURIComponent(id)}/trades?limit=${limit}`,
+    signal,
+  );
+}
+
 export function stopPM(id: string): Promise<PMStateChangeResponse> {
   return postJSON<PMStateChangeResponse>(`/api/pms/${encodeURIComponent(id)}/stop`);
 }
@@ -140,6 +202,18 @@ export function pausePM(id: string): Promise<PMStateChangeResponse> {
 
 export function resumePM(id: string): Promise<PMStateChangeResponse> {
   return postJSON<PMStateChangeResponse>(`/api/pms/${encodeURIComponent(id)}/resume`);
+}
+
+export function fetchKillSwitch(signal?: AbortSignal): Promise<KillSwitchStatus> {
+  return getJSON<KillSwitchStatus>("/api/kill-switch", signal);
+}
+
+export function activateKillSwitch(reason: string): Promise<KillSwitchStatus> {
+  return postJSONBody<KillSwitchStatus>("/api/kill-switch/activate", { reason });
+}
+
+export function deactivateKillSwitch(): Promise<KillSwitchStatus> {
+  return postJSON<KillSwitchStatus>("/api/kill-switch/deactivate");
 }
 
 export { ApiError };

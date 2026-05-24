@@ -17,11 +17,14 @@ from agora.platform.workers.pm_supervisor import (
     PMSupervisor,
     ProvisionInput,
     ProvisionResult,
+    TradingCycleInput,
+    TradingCycleOutput,
     get_current_mode,
     heartbeat_journal,
     mark_pm_running,
     mark_pm_stopped,
     provision_pm_workspace,
+    trading_cycle_activity,
 )
 
 if TYPE_CHECKING:
@@ -34,6 +37,8 @@ __all__ = [
     "PMSupervisor",
     "ProvisionInput",
     "ProvisionResult",
+    "TradingCycleInput",
+    "TradingCycleOutput",
     "get_current_mode",
     "heartbeat_journal",
     "main",
@@ -41,6 +46,7 @@ __all__ = [
     "mark_pm_stopped",
     "provision_pm_workspace",
     "say_hello",
+    "trading_cycle_activity",
 ]
 
 

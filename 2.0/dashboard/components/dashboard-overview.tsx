@@ -4,16 +4,17 @@
 // /api/pms via TanStack Query at a 5s cadence, renders graceful error states
 // when the control plane is unreachable.
 //
-// Static today, real later:
-//   - PRs card is hard-coded "PRs (0)" because there's no /api/prs yet (K5).
-//   - Kill-switch pill is hard-coded "off" because there's no /api/kill-switch
-//     yet (K3). Both have explicit TODO markers in-file.
+// K3 Step 3.7 wired the kill-switch toggle: status pill and activate /
+// deactivate buttons hit /api/kill-switch{/, /activate, /deactivate}.
+//
+// PRs card is hard-coded "PRs (0)" because there's no /api/prs yet (K5).
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Circle } from "lucide-react";
 import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -23,11 +24,15 @@ import {
 } from "@/components/ui/card";
 import { EventTicker } from "@/components/event-ticker";
 import {
+  activateKillSwitch,
+  deactivateKillSwitch,
   fetchHealth,
+  fetchKillSwitch,
   fetchMode,
   fetchPMs,
   type HealthResponse,
   type HealthStatus,
+  type KillSwitchStatus,
   type ModeResponse,
   type PMSummary,
 } from "@/lib/api";
@@ -58,18 +63,25 @@ export function DashboardOverview() {
     queryKey: ["pms"],
     queryFn: ({ signal }) => fetchPMs(signal),
   });
+  const killSwitch = useQuery<KillSwitchStatus>({
+    queryKey: ["kill-switch"],
+    queryFn: ({ signal }) => fetchKillSwitch(signal),
+  });
 
   const pmCount = pms.data?.length ?? null;
   const modeText = mode.data ? (MODE_LABEL[mode.data.mode] ?? mode.data.mode) : "—";
-  // TODO: K3 — wire to /api/kill-switch.
-  const killSwitch: "off" | "on" = "off";
+  const killSwitchLabel = killSwitch.data
+    ? killSwitch.data.active
+      ? "on"
+      : "off"
+    : "—";
 
   const headerSummary =
     pms.isError || mode.isError
       ? "control plane unreachable"
       : `${pmCount ?? "—"} PMs running, mode: ${
           mode.data ? mode.data.mode : "—"
-        }, kill switch: ${killSwitch}`;
+        }, kill switch: ${killSwitchLabel}`;
 
   return (
     <div className="flex flex-col gap-6">
@@ -78,12 +90,7 @@ export function DashboardOverview() {
           <h1 className="text-3xl font-bold tracking-tight">AGORA</h1>
           <p className="text-sm text-muted-foreground">{headerSummary}</p>
         </div>
-        <Badge
-          variant={killSwitch === "off" ? "secondary" : "destructive"}
-          className="text-xs uppercase tracking-wide"
-        >
-          kill switch: {killSwitch}
-        </Badge>
+        <KillSwitchControl status={killSwitch.data} />
       </header>
 
       <Card>
@@ -222,5 +229,82 @@ function PRsCard() {
         PR queue is empty. (Lands in K5.)
       </CardContent>
     </Card>
+  );
+}
+
+// ----- Kill switch (K3 Step 3.7) -----------------------------------------
+// Pill + button. Reads /api/kill-switch on a 5s cadence (the
+// providers' default), POSTs to /activate or /deactivate via
+// TanStack mutation, invalidates the query on success.
+//
+// We use window.prompt / window.confirm here per K3 plan: simplest
+// possible UX that captures a reason and a confirmation. K8 hardening
+// can swap for a real modal.
+
+function KillSwitchControl({ status }: { status: KillSwitchStatus | undefined }) {
+  const qc = useQueryClient();
+  const active = status?.active ?? false;
+
+  const activateMut = useMutation({
+    mutationFn: (reason: string) => activateKillSwitch(reason),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["kill-switch"] }),
+  });
+  const deactivateMut = useMutation({
+    mutationFn: () => deactivateKillSwitch(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["kill-switch"] }),
+  });
+
+  const onActivate = () => {
+    const reason = window.prompt("Reason for activating kill switch?");
+    if (reason && reason.trim().length > 0) {
+      activateMut.mutate(reason.trim());
+    }
+  };
+  const onDeactivate = () => {
+    if (window.confirm("Deactivate kill switch? Trading orders will resume.")) {
+      deactivateMut.mutate();
+    }
+  };
+
+  const pending = activateMut.isPending || deactivateMut.isPending;
+  const lastError = activateMut.error ?? deactivateMut.error ?? null;
+  // ``status` undefined while the query is pending → render a neutral
+  // pill rather than guessing a state.
+  const tooltip = active && status?.reason ? status.reason : undefined;
+
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <Badge
+        variant={active ? "destructive" : "secondary"}
+        className="text-xs uppercase tracking-wide"
+        title={tooltip}
+      >
+        kill switch: {status === undefined ? "—" : active ? "on" : "off"}
+      </Badge>
+      {active ? (
+        <Button
+          size="sm"
+          variant="default"
+          onClick={onDeactivate}
+          disabled={pending}
+        >
+          Deactivate
+        </Button>
+      ) : (
+        <Button
+          size="sm"
+          variant="destructive"
+          onClick={onActivate}
+          disabled={pending || status === undefined}
+        >
+          Activate
+        </Button>
+      )}
+      {lastError && (
+        <span className="text-xs text-destructive">
+          {(lastError as Error).message}
+        </span>
+      )}
+    </div>
   );
 }

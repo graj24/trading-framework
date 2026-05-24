@@ -11,7 +11,7 @@
 //   - Pause:  enabled if status == "running"
 //   - Resume: enabled if status == "paused"
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { AlertTriangle, Circle } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -26,11 +26,13 @@ import {
   fetchJournal,
   fetchMode,
   fetchPM,
+  fetchTrades,
   pausePM,
   resumePM,
   stopPM,
   type JournalResponse,
   type ModeResponse,
+  type PaperTrade,
   type PMRecord,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -64,6 +66,10 @@ export function PMDetail({ id }: { id: string }) {
   const mode = useQuery<ModeResponse>({
     queryKey: ["mode"],
     queryFn: ({ signal }) => fetchMode(signal),
+  });
+  const trades = useQuery<PaperTrade[]>({
+    queryKey: ["pm", id, "trades"],
+    queryFn: ({ signal }) => fetchTrades(id, 100, signal),
   });
 
   // Each mutation invalidates the PM record so the displayed status
@@ -205,6 +211,8 @@ export function PMDetail({ id }: { id: string }) {
         </CardContent>
       </Card>
 
+      <PositionsCard query={trades} />
+
       <Card>
         <CardHeader>
           <CardTitle>Journal — last 50 entries</CardTitle>
@@ -231,5 +239,164 @@ export function PMDetail({ id }: { id: string }) {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// ----- Positions card (K3 Step 3.6) ---------------------------------------
+// Renders the PM's recent trades. Header shows open count + realized
+// PnL (sum across non-open trades). The table is intentionally plain —
+// shadcn doesn't ship a table primitive in K3, and a richer view is a
+// K8 polish target.
+
+const INR_FORMATTER = new Intl.NumberFormat("en-IN", {
+  style: "currency",
+  currency: "INR",
+  maximumFractionDigits: 2,
+});
+
+const OUTCOME_LABEL: Record<PaperTrade["outcome"], string> = {
+  open: "open",
+  sl_hit: "SL hit",
+  target_hit: "target hit",
+  eod_close: "eod close",
+  manual: "manual",
+};
+
+function formatDecimal(value: string | null, fallback = "—"): string {
+  if (value === null) return fallback;
+  // The wire shape is a Decimal serialized as a string; parse for display.
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(2) : fallback;
+}
+
+function PositionsCard({
+  query,
+}: {
+  query: UseQueryResult<PaperTrade[], Error>;
+}) {
+  if (query.isError) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Positions and PnL</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-2 text-sm text-destructive">
+            <AlertTriangle className="h-4 w-4" />
+            Could not load trades.
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+  if (!query.data) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Positions and PnL</CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm text-muted-foreground">
+          Loading positions...
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const trades = query.data;
+  const openCount = trades.filter((t) => t.outcome === "open").length;
+  // Realized PnL: sum pnl_inr across closed trades. Decimal-as-string
+  // → number conversion happens once here; precision is fine for a
+  // header-level summary.
+  const realizedPnl = trades
+    .filter((t) => t.outcome !== "open" && t.pnl_inr !== null)
+    .reduce((acc, t) => acc + Number(t.pnl_inr), 0);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Positions and PnL</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="mb-3 flex flex-wrap gap-x-4 gap-y-1 text-sm">
+          <span>
+            <span className="text-muted-foreground">Open: </span>
+            <span className="font-medium">{openCount}</span>
+          </span>
+          <span className="text-muted-foreground">|</span>
+          <span>
+            <span className="text-muted-foreground">Realized PnL: </span>
+            <span
+              className={cn(
+                "font-medium",
+                realizedPnl > 0 && "text-green-600",
+                realizedPnl < 0 && "text-red-600",
+              )}
+            >
+              {INR_FORMATTER.format(realizedPnl)}
+            </span>
+          </span>
+        </div>
+        {trades.length === 0 ? (
+          <div className="text-sm text-muted-foreground">
+            No trades yet.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="text-muted-foreground">
+                <tr className="border-b">
+                  <th className="px-2 py-1.5 text-left font-medium">Symbol</th>
+                  <th className="px-2 py-1.5 text-left font-medium">Side</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Qty</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Entry</th>
+                  <th className="px-2 py-1.5 text-right font-medium">SL</th>
+                  <th className="px-2 py-1.5 text-right font-medium">Exit</th>
+                  <th className="px-2 py-1.5 text-right font-medium">PnL</th>
+                  <th className="px-2 py-1.5 text-left font-medium">Outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {trades.map((t) => (
+                  <tr key={t.id} className="border-b last:border-b-0">
+                    <td className="px-2 py-1.5 font-medium text-foreground">
+                      {t.symbol}
+                    </td>
+                    <td className="px-2 py-1.5">{t.side}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">
+                      {t.quantity}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">
+                      {formatDecimal(t.entry_price)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">
+                      {formatDecimal(t.stop_loss)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">
+                      {formatDecimal(t.exit_price)}
+                    </td>
+                    <td
+                      className={cn(
+                        "px-2 py-1.5 text-right tabular-nums",
+                        t.pnl_inr !== null &&
+                          Number(t.pnl_inr) > 0 &&
+                          "text-green-600",
+                        t.pnl_inr !== null &&
+                          Number(t.pnl_inr) < 0 &&
+                          "text-red-600",
+                      )}
+                    >
+                      {formatDecimal(t.pnl_inr)}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {OUTCOME_LABEL[t.outcome] ?? t.outcome}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

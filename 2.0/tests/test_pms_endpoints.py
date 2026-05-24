@@ -747,3 +747,134 @@ def test_stop_publishes_stopped_event(
     assert received[0]["type"] == "agent.lifecycle"
     assert received[0]["payload"]["event"] == "stopped"
     assert received[0]["payload"]["pm_id"] == "pm1"
+
+
+# ------------------------------------------------------------ trades endpoint
+# Step 3.6 — GET /api/pms/{id}/trades. Mirrors the journal endpoint:
+# 503 when pool is None, 404 when PM is missing, otherwise returns the
+# trade ledger via trade_repo.list_trades.
+
+
+def _stub_trade_repo(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    trades: list[Any] | None = None,
+) -> dict[str, list[Any]]:
+    """Patch ``trade_repo.list_trades`` to return ``trades``.
+
+    Returns the call log so tests can assert on the ``limit`` value the
+    endpoint forwarded.
+    """
+    from agora.platform.control_plane import trade_repo as trade_repo_module
+
+    calls: dict[str, list[Any]] = {"list_trades": []}
+
+    async def fake_list_trades(pool: Any, pm_id: str, limit: int = 100) -> list[Any]:
+        calls["list_trades"].append({"pm_id": pm_id, "limit": limit})
+        return list(trades or [])
+
+    monkeypatch.setattr(trade_repo_module, "list_trades", fake_list_trades)
+    return calls
+
+
+def test_get_trades_404_when_pm_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_repo(monkeypatch, get_record=None)
+    _stub_trade_repo(monkeypatch)
+    r = client.get("/api/pms/missing/trades")
+    assert r.status_code == 404
+
+
+def test_get_trades_503_when_pool_is_none(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pool unavailable → 503, mirroring every other DB-touching route."""
+
+    async def no_pool(settings: Settings) -> None:
+        return None
+
+    monkeypatch.setattr(state_module, "_build_pool", no_pool)
+    fastapi_app = app_module.create_app(settings)
+    with TestClient(fastapi_app) as c:
+        r = c.get("/api/pms/pm1/trades")
+    assert r.status_code == 503
+
+
+def test_get_trades_returns_list(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two-trade ledger: one open, one closed (eod_close)."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from agora.platform.control_plane.trade_repo import PaperTradeRecord
+
+    _stub_repo(monkeypatch, get_record=_make_pm_record())
+    trades = [
+        PaperTradeRecord(
+            id=2,
+            pm_id="pm1",
+            symbol="TCS",
+            side="LONG",
+            quantity=27,
+            entry_price=Decimal("3680.50"),
+            entry_ts=datetime(2025, 6, 1, tzinfo=UTC),
+            stop_loss=Decimal("3650.10"),
+            target=None,
+            exit_price=None,
+            exit_ts=None,
+            outcome="open",
+            pnl_inr=None,
+            pnl_pct=None,
+            strategy_id="momentum_v1",
+            metadata={},
+        ),
+        PaperTradeRecord(
+            id=1,
+            pm_id="pm1",
+            symbol="INFY",
+            side="LONG",
+            quantity=62,
+            entry_price=Decimal("1601.00"),
+            entry_ts=datetime(2025, 6, 1, tzinfo=UTC),
+            stop_loss=Decimal("1580.00"),
+            target=None,
+            exit_price=Decimal("1612.30"),
+            exit_ts=datetime(2025, 6, 1, 9, 55, tzinfo=UTC),
+            outcome="eod_close",
+            pnl_inr=Decimal("700.60"),
+            pnl_pct=Decimal("0.71"),
+            strategy_id="momentum_v1",
+            metadata={},
+        ),
+    ]
+    calls = _stub_trade_repo(monkeypatch, trades=trades)
+
+    r = client.get("/api/pms/pm1/trades", params={"limit": 50})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body) == 2
+    assert body[0]["symbol"] == "TCS"
+    assert body[0]["outcome"] == "open"
+    assert body[1]["outcome"] == "eod_close"
+    # Decimal columns serialize as string in the JSON wire shape.
+    assert body[1]["pnl_inr"] == "700.60"
+    # The endpoint must forward the limit query param to list_trades.
+    assert calls["list_trades"] == [{"pm_id": "pm1", "limit": 50}]
+
+
+def test_get_trades_default_limit_is_100(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_repo(monkeypatch, get_record=_make_pm_record())
+    calls = _stub_trade_repo(monkeypatch, trades=[])
+    r = client.get("/api/pms/pm1/trades")
+    assert r.status_code == 200
+    assert calls["list_trades"] == [{"pm_id": "pm1", "limit": 100}]
+
+
+def test_get_trades_limit_caps_at_500(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """limit > 500 must reject 422 before any I/O."""
+    _stub_repo(monkeypatch, get_record=_make_pm_record())
+    _stub_trade_repo(monkeypatch)
+    r = client.get("/api/pms/pm1/trades", params={"limit": 10000})
+    assert r.status_code == 422

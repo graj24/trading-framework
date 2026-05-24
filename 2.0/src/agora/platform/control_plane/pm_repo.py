@@ -41,6 +41,14 @@ class PMRecord(BaseModel):
 
     ``starting_capital_inr`` round-trips as ``float`` for JSON ergonomics;
     the column is ``NUMERIC`` in Postgres so we cast at the boundary.
+
+    .. note::
+        ``config`` is a legacy K2 column kept for migration cleanliness.
+        The source of truth for runtime PM config (cadence, watchlist,
+        strategy selection) is ``<workspace>/config.yaml`` — see
+        ``apps/propfirm/README.md`` § "PM config: source of truth".
+        K4+ tools must NOT write to ``pm.config`` directly. Slated for
+        removal in K8 hardening.
     """
 
     id: str
@@ -114,6 +122,10 @@ async def insert_pm(
     starting_capital_inr: float,
     prompt_path: str,
     config: dict[str, Any],
+    # TODO(K8): drop pm.config column. The workspace's config.yaml is the
+    # source of truth (see apps/propfirm/README.md § "PM config: source
+    # of truth"). K2 spawn passes {} here for compatibility; nothing
+    # reads it.
 ) -> None:
     """Insert a new PM row in status ``provisioning``.
 
