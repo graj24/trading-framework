@@ -309,10 +309,12 @@ async def trading_cycle_activity(payload: TradingCycleInput) -> TradingCycleOutp
     See module docstring for the workflow/activity sandbox split.
     """
     from agora.apps.propfirm.trading.cycle import run_trading_cycle
+    from agora.platform.workers._market_data import get_or_build_market_data
     from agora.platform.workers._pool import get_or_build_pool
 
     pool = await get_or_build_pool()
-    result = await run_trading_cycle(pool, payload.pm_id)
+    market_data = await get_or_build_market_data()
+    result = await run_trading_cycle(pool, payload.pm_id, market_data=market_data)
     return TradingCycleOutput(
         placed=list(result.placed),
         closed=list(result.closed),
@@ -338,10 +340,12 @@ async def eod_close_activity(payload: EodCloseInput) -> EodCloseOutput:
     doesn't churn forever.
     """
     from agora.apps.propfirm.trading.eod import close_positions_for_pm
+    from agora.platform.workers._market_data import get_or_build_market_data
     from agora.platform.workers._pool import get_or_build_pool
 
     pool = await get_or_build_pool()
-    result = await close_positions_for_pm(pool, payload.pm_id)
+    market_data = await get_or_build_market_data()
+    result = await close_positions_for_pm(pool, payload.pm_id, market_data=market_data)
     return EodCloseOutput(
         closed=list(result.closed),
         skipped=list(result.skipped),
