@@ -59,6 +59,28 @@ export type JournalResponse = {
   lines: string[];
 };
 
+// Mirrors PaperTradeRecord in src/agora/platform/control_plane/trade_repo.py.
+// Decimal columns serialise as JSON strings (asyncpg/Pydantic preserve precision);
+// the dashboard formats them via Intl.NumberFormat. Timestamps are ISO 8601 strings.
+export type PaperTrade = {
+  id: number;
+  pm_id: string;
+  symbol: string;
+  side: "LONG" | "SHORT";
+  quantity: number;
+  entry_price: string | null;
+  entry_ts: string | null;
+  stop_loss: string | null;
+  target: string | null;
+  exit_price: string | null;
+  exit_ts: string | null;
+  outcome: "open" | "sl_hit" | "target_hit" | "eod_close" | "manual";
+  pnl_inr: string | null;
+  pnl_pct: string | null;
+  strategy_id: string | null;
+  metadata: Record<string, unknown>;
+};
+
 export type PMStateChangeResponse = {
   pm_id: string;
   status: string;
@@ -126,6 +148,17 @@ export function fetchJournal(
 ): Promise<JournalResponse> {
   return getJSON<JournalResponse>(
     `/api/pms/${encodeURIComponent(id)}/journal?lines=${lines}`,
+    signal,
+  );
+}
+
+export function fetchTrades(
+  id: string,
+  limit = 100,
+  signal?: AbortSignal,
+): Promise<PaperTrade[]> {
+  return getJSON<PaperTrade[]>(
+    `/api/pms/${encodeURIComponent(id)}/trades?limit=${limit}`,
     signal,
   );
 }

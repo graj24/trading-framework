@@ -56,6 +56,7 @@ from agora.platform.control_plane.state import (
     build_app_state,
     teardown_app_state,
 )
+from agora.platform.control_plane.trade_repo import PaperTradeRecord
 from agora.platform.observability.logging import configure_logging
 from agora.platform.shared.settings import Settings, get_settings
 
@@ -238,6 +239,24 @@ def _build_router(settings: Settings) -> APIRouter:
         workspace_root = pm_provision.resolve_workspace_root(state.settings)
         journal_lines = pm_provision.read_journal_tail(workspace_root / pm_id, lines=lines)
         return JournalResponse(pm_id=pm_id, lines=journal_lines)
+
+    @router.get("/pms/{pm_id}/trades", response_model=list[PaperTradeRecord])
+    async def get_pm_trades(
+        pm_id: str,
+        request: Request,
+        # Mirrors the journal endpoint: 100 default, 500 cap. Same DoS
+        # ceiling, same "tail of the ledger" semantics.
+        limit: int = Query(100, ge=1, le=500),
+    ) -> list[PaperTradeRecord]:
+        from agora.platform.control_plane import trade_repo
+
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        pm = await pm_repo.get_pm(state.postgres_pool, pm_id)
+        if pm is None:
+            raise HTTPException(status_code=404, detail=f"pm {pm_id!r} not found")
+        return await trade_repo.list_trades(state.postgres_pool, pm_id, limit=limit)
 
     @router.post("/pms/spawn", response_model=SpawnPMResponse)
     async def spawn_pm(req: SpawnPMRequest, request: Request) -> SpawnPMResponse:

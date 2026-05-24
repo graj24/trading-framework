@@ -33,6 +33,9 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from agora.platform.workers.pm_supervisor import (
+    EodCloseInput,
+    EodCloseOutput,
+    EodCloser,
     HeartbeatInput,
     PMConfig,
     PMSupervisor,
@@ -360,3 +363,89 @@ async def test_supervisor_runs_heartbeat_when_mode_is_build() -> None:
     assert all(
         c[0] != "trading_cycle" for c in calls
     ), f"trading_cycle fired in build mode; calls={calls}"
+
+
+# ------------------------------------------------------ EOD closer (Step 3.6)
+# The EodCloser workflow lists running PMs via ``list_running_pms_activity``
+# then drives ``eod_close_activity`` per-PM. Tests stub both activities and
+# assert the call shape: list_running_pms fires once, eod_close fires per id.
+
+
+async def test_eod_closer_runs_one_close_per_running_pm() -> None:
+    """list_running_pms -> eod_close per id, sequential."""
+    try:
+        env = await _start_env()
+    except Exception as e:
+        pytest.skip(f"Temporal test server unavailable: {e}")
+
+    calls: list[tuple[str, Any]] = []
+
+    @activity.defn(name="list_running_pms")
+    async def mock_list_running_pms() -> list[str]:
+        calls.append(("list_running_pms", None))
+        return ["pm1", "pm2"]
+
+    @activity.defn(name="eod_close")
+    async def mock_eod_close(payload: EodCloseInput) -> EodCloseOutput:
+        calls.append(("eod_close", payload.pm_id))
+        return EodCloseOutput(closed=[1], skipped=[])
+
+    task_queue = f"test-eod-{uuid.uuid4()}"
+
+    async with (
+        env,
+        Worker(
+            env.client,
+            task_queue=task_queue,
+            workflows=[EodCloser],
+            activities=[mock_list_running_pms, mock_eod_close],
+        ),
+    ):
+        handle = await env.client.start_workflow(
+            EodCloser.run,
+            id=f"eod-test-{uuid.uuid4()}",
+            task_queue=task_queue,
+        )
+        await handle.result()
+
+    # list_running_pms fires exactly once.
+    assert [c for c in calls if c[0] == "list_running_pms"] == [("list_running_pms", None)]
+    # eod_close fires once per running PM in the order returned.
+    eod_calls = [c for c in calls if c[0] == "eod_close"]
+    assert eod_calls == [("eod_close", "pm1"), ("eod_close", "pm2")]
+
+
+async def test_eod_close_activity_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The activity body delegates to ``close_positions_for_pm``.
+
+    Tests the ``@activity.defn`` body directly (no workflow harness)
+    so the dispatch is the only thing under test. The pool builder
+    and the closer are stubbed; the activity must call the closer
+    once with the payload's ``pm_id`` and shape the result correctly.
+    """
+    from agora.apps.propfirm.trading.eod import EodCloseResult
+    from agora.platform.workers import _pool, pm_supervisor
+
+    pool_calls: list[Any] = []
+    closer_calls: list[str] = []
+
+    async def fake_pool() -> Any:
+        pool_calls.append("pool")
+        return object()
+
+    async def fake_closer(_pool: Any, pm_id: str, **_: Any) -> EodCloseResult:
+        closer_calls.append(pm_id)
+        return EodCloseResult(pm_id=pm_id, closed=[7, 8], skipped=["FOO: gone"])
+
+    monkeypatch.setattr(_pool, "get_or_build_pool", fake_pool)
+    # The activity imports the closer lazily inside the body; patch the
+    # module attribute the body resolves to.
+    import agora.apps.propfirm.trading.eod as eod_module
+
+    monkeypatch.setattr(eod_module, "close_positions_for_pm", fake_closer)
+
+    out = await pm_supervisor.eod_close_activity(EodCloseInput(pm_id="pm1"))
+
+    assert pool_calls == ["pool"]
+    assert closer_calls == ["pm1"]
+    assert out == EodCloseOutput(closed=[7, 8], skipped=["FOO: gone"])

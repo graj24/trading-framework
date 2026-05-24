@@ -119,6 +119,28 @@ class TradingCycleOutput:
     rejected: list[str]
 
 
+@dataclass
+class EodCloseInput:
+    """Args for the EOD close activity (K3 Step 3.6)."""
+
+    pm_id: str
+
+
+@dataclass
+class EodCloseOutput:
+    """Result shape for the EOD close activity.
+
+    Same JSON-shape discipline as :class:`TradingCycleOutput`: plain
+    ints / strings cross the workflow boundary so the
+    :class:`EodCloser` workflow doesn't have to import
+    :class:`~agora.apps.propfirm.trading.eod.EodCloseResult` (which
+    pulls in asyncpg via :mod:`trade_repo`).
+    """
+
+    closed: list[int]
+    skipped: list[str]
+
+
 # --------------------------------------------------------------- activities
 # Activities run on the worker process, outside the workflow sandbox.
 # ALL non-stdlib imports must be deferred to function bodies so the
@@ -299,6 +321,50 @@ async def trading_cycle_activity(payload: TradingCycleInput) -> TradingCycleOutp
     )
 
 
+@activity.defn(name="eod_close")
+async def eod_close_activity(payload: EodCloseInput) -> EodCloseOutput:
+    """Close every open paper position for one PM at the latest price.
+
+    K3 Step 3.6. Defers heavy imports inside the body to keep the
+    workflow sandbox clean. The closer pulls in pandas/numpy via the
+    parquet market-data adapter and asyncpg via :mod:`trade_repo` —
+    none of which the workflow validator can see at import time.
+
+    Idempotency: the closer takes the snapshot of currently-open
+    trades and closes each one. A re-execution after a successful
+    pass finds zero open trades and returns an empty result, so
+    Temporal's retry-on-failure is safe. We still cap retries via
+    :class:`RetryPolicy` at the workflow site so a wedged adapter
+    doesn't churn forever.
+    """
+    from agora.apps.propfirm.trading.eod import close_positions_for_pm
+    from agora.platform.workers._pool import get_or_build_pool
+
+    pool = await get_or_build_pool()
+    result = await close_positions_for_pm(pool, payload.pm_id)
+    return EodCloseOutput(
+        closed=list(result.closed),
+        skipped=list(result.skipped),
+    )
+
+
+@activity.defn(name="list_running_pms")
+async def list_running_pms_activity() -> list[str]:
+    """Return every PM currently in ``status='running'``.
+
+    K3 Step 3.6 — the :class:`EodCloser` workflow uses this to
+    discover what to close. Workflow code can't talk to the DB, so the
+    list-of-pms query is an activity. Returns plain ``list[str]`` (PM
+    ids) so the workflow boundary is JSON-only.
+    """
+    from agora.platform.control_plane.pm_repo import list_pms
+    from agora.platform.workers._pool import get_or_build_pool
+
+    pool = await get_or_build_pool()
+    pms = await list_pms(pool)
+    return [pm.id for pm in pms if pm.status == "running"]
+
+
 # ---------------------------------------------------------------- workflow
 
 
@@ -443,7 +509,47 @@ class PMSupervisor:
             )
 
 
+@workflow.defn(name="EodCloser")
+class EodCloser:
+    """End-of-day position closer (K3 Step 3.6).
+
+    A scheduled workflow run once per trading day at 09:55 UTC
+    (= 15:25 IST, five minutes before NSE close). For every PM in
+    ``status='running'``, calls the EOD close activity which walks
+    that PM's open trades and closes them at the latest available
+    price (``outcome='eod_close'``).
+
+    Sequential, not parallel: the PM count in K3 is small and
+    sequential awaits are always replay-safe. Going parallel inside
+    a workflow needs care for determinism (futures/asyncio.gather
+    with mixed completion order can drift); the simpler path is the
+    right one until the leaderboard has dozens of PMs.
+    """
+
+    @workflow.run
+    async def run(self) -> None:
+        pm_ids = await workflow.execute_activity(
+            list_running_pms_activity,
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        for pm_id in pm_ids:
+            # Generous per-PM timeout: the closer does N market-data
+            # snapshots + N close_trade writes; 120s gives ~10x
+            # headroom on a 10-symbol portfolio. ``maximum_attempts=2``
+            # so a transient adapter blip retries once but a stuck PM
+            # doesn't churn the whole closer.
+            await workflow.execute_activity(
+                eod_close_activity,
+                EodCloseInput(pm_id=pm_id),
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+
 __all__ = [
+    "EodCloseInput",
+    "EodCloseOutput",
+    "EodCloser",
     "HeartbeatInput",
     "PMConfig",
     "PMSupervisor",
@@ -451,8 +557,10 @@ __all__ = [
     "ProvisionResult",
     "TradingCycleInput",
     "TradingCycleOutput",
+    "eod_close_activity",
     "get_current_mode",
     "heartbeat_journal",
+    "list_running_pms_activity",
     "mark_pm_running",
     "mark_pm_stopped",
     "provision_pm_workspace",
