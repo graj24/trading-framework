@@ -70,3 +70,23 @@ legacy `<repo-root>/stocks/<SYM>/price_history.parquet`. Override the
 root via `AGORA_STOCKS_ROOT=/path/to/stocks` if you don't have that
 checkout side-by-side. The CLI exits with a clear error if neither the
 explicit nor the default path resolves.
+
+## PM config: source of truth
+
+Each PM has two config-shaped surfaces:
+
+- `pms.config` (Postgres JSONB column) — populated as `{}` by K2's
+  spawn endpoint and never written again.
+- `pms/<pm_id>/config.yaml` (workspace file) — written by the
+  provision activity at PM spawn (K2.1), read by the workflow at
+  start (K2 post-audit/3) for cadence values and by the trading
+  cycle (K3.5) for the watchlist.
+
+**The workspace YAML is the source of truth.** The DB column is
+deprecated but kept for now so existing PMs don't need a migration.
+K4+ tools that need to evolve config (cadence, watchlist, strategy
+selection) write to the YAML; the next workflow restart picks up
+the change.
+
+The DB column will be dropped in K8 hardening once we're confident
+nothing reads from it.
