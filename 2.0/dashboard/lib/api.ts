@@ -86,6 +86,12 @@ export type PMStateChangeResponse = {
   status: string;
 };
 
+export type KillSwitchStatus = {
+  active: boolean;
+  activated_at: string | null;
+  reason: string | null;
+};
+
 class ApiError extends Error {
   constructor(
     message: string,
@@ -116,6 +122,29 @@ async function postJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: { accept: "application/json" },
+    signal,
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new ApiError(`POST ${path} -> ${res.status}`, res.status);
+  }
+  return (await res.json()) as T;
+}
+
+async function postJSONBody<T>(
+  path: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<T> {
+  // Variant of postJSON that sends a JSON body. Used by the kill
+  // switch activate endpoint, which requires a reason.
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(body),
     signal,
     cache: "no-store",
   });
@@ -173,6 +202,18 @@ export function pausePM(id: string): Promise<PMStateChangeResponse> {
 
 export function resumePM(id: string): Promise<PMStateChangeResponse> {
   return postJSON<PMStateChangeResponse>(`/api/pms/${encodeURIComponent(id)}/resume`);
+}
+
+export function fetchKillSwitch(signal?: AbortSignal): Promise<KillSwitchStatus> {
+  return getJSON<KillSwitchStatus>("/api/kill-switch", signal);
+}
+
+export function activateKillSwitch(reason: string): Promise<KillSwitchStatus> {
+  return postJSONBody<KillSwitchStatus>("/api/kill-switch/activate", { reason });
+}
+
+export function deactivateKillSwitch(): Promise<KillSwitchStatus> {
+  return postJSON<KillSwitchStatus>("/api/kill-switch/deactivate");
 }
 
 export { ApiError };

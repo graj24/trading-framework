@@ -159,6 +159,26 @@ class ModeResponse(BaseModel):
     next_transition: ModeTransition | None = None
 
 
+class KillSwitchStatus(BaseModel):
+    """Body of the kill-switch GET / activate / deactivate endpoints."""
+
+    active: bool
+    activated_at: datetime | None = None
+    reason: str | None = None
+
+
+class KillSwitchActivateRequest(BaseModel):
+    """Body of ``POST /api/kill-switch/activate``.
+
+    ``reason`` is required and bounded — too short is unhelpful in the
+    audit trail, too long is a UI footgun. K8 may swap for a structured
+    schema (categories, links to incident tickets); for K3 a free-text
+    one-liner is enough.
+    """
+
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
 def _aggregate_status(services: dict[str, ServiceHealth]) -> health.Status:
     """Worst-of: down > degraded > ok."""
     rank = {"ok": 0, "degraded": 1, "down": 2}
@@ -532,6 +552,136 @@ def _build_router(settings: Settings) -> APIRouter:
                 else None
             ),
         )
+
+    # ---- Kill switch (Step 3.7) ------------------------------------------
+    # The kill switch is the global trading cut-off. The toggle endpoints
+    # are intentionally NOT mode-gated — operators must be able to flip
+    # the switch regardless of the platform's mode (build, freeze, or
+    # trading). Only orders are blocked by the cached
+    # ``broker.is_kill_switch_active`` check.
+
+    @router.get("/kill-switch", response_model=KillSwitchStatus)
+    async def get_kill_switch(request: Request) -> KillSwitchStatus:
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        async with state.postgres_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT active, activated_at, reason FROM kill_switch WHERE id = 1"
+            )
+        # The singleton row is seeded by migration 0001; ``row is None``
+        # means the migration was rolled back. Treat as a hard failure
+        # so the operator notices, rather than silently reporting "off".
+        if row is None:
+            raise HTTPException(
+                status_code=500,
+                detail="kill_switch row missing (migrations rolled back?)",
+            )
+        return KillSwitchStatus(
+            active=bool(row["active"]),
+            activated_at=row["activated_at"],
+            reason=row["reason"],
+        )
+
+    @router.post("/kill-switch/activate", response_model=KillSwitchStatus)
+    async def activate_kill_switch(
+        req: KillSwitchActivateRequest,
+        request: Request,
+    ) -> KillSwitchStatus:
+        """Activate the kill switch.
+
+        Idempotent — calling this on an already-active switch returns
+        the existing record (does NOT overwrite ``reason`` or
+        ``activated_at``). The first activation wins so post-mortems
+        reference the original trigger.
+        """
+        from agora.platform.tools.broker import _invalidate_kill_switch_cache
+
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        now = datetime.now(UTC)
+        async with state.postgres_pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT active, activated_at, reason FROM kill_switch WHERE id = 1 FOR UPDATE"
+            )
+            if row is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="kill_switch row missing (migrations rolled back?)",
+                )
+            if row["active"]:
+                # No-op: keep the original reason + activated_at.
+                status = KillSwitchStatus(
+                    active=True,
+                    activated_at=row["activated_at"],
+                    reason=row["reason"],
+                )
+            else:
+                await conn.execute(
+                    "UPDATE kill_switch "
+                    "SET active = TRUE, activated_at = $1, reason = $2 "
+                    "WHERE id = 1",
+                    now,
+                    req.reason,
+                )
+                status = KillSwitchStatus(
+                    active=True,
+                    activated_at=now,
+                    reason=req.reason,
+                )
+        # Drop the cached value so the next ``is_kill_switch_active``
+        # call in this process sees the new state immediately. Worker
+        # processes pick up the change within the 1-second TTL.
+        _invalidate_kill_switch_cache()
+        # Reuse the existing 3-event vocabulary so the dashboard ticker
+        # shows the toggle without a new event type.
+        await state.event_bus.publish(
+            "agent.lifecycle",
+            {
+                "event": "kill_switch_activated",
+                "reason": req.reason,
+            },
+        )
+        return status
+
+    @router.post("/kill-switch/deactivate", response_model=KillSwitchStatus)
+    async def deactivate_kill_switch(request: Request) -> KillSwitchStatus:
+        """Deactivate the kill switch.
+
+        Idempotent — already-off returns the current row. Resets
+        ``activated_at`` and ``reason`` to ``NULL`` so the next
+        activation starts a fresh audit trail.
+        """
+        from agora.platform.tools.broker import _invalidate_kill_switch_cache
+
+        state = _get_state(request)
+        if state.postgres_pool is None:
+            raise HTTPException(status_code=503, detail="postgres unavailable")
+        async with state.postgres_pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow("SELECT active FROM kill_switch WHERE id = 1 FOR UPDATE")
+            if row is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="kill_switch row missing (migrations rolled back?)",
+                )
+            if not row["active"]:
+                # Already off; the row is already cleared.
+                pass
+            else:
+                await conn.execute(
+                    "UPDATE kill_switch "
+                    "SET active = FALSE, activated_at = NULL, reason = NULL "
+                    "WHERE id = 1"
+                )
+        _invalidate_kill_switch_cache()
+        await state.event_bus.publish(
+            "agent.lifecycle",
+            {
+                "event": "kill_switch_deactivated",
+            },
+        )
+        return KillSwitchStatus(active=False, activated_at=None, reason=None)
 
     @router.post("/internal/events", include_in_schema=False)
     async def internal_event(

@@ -16,6 +16,8 @@ records the trade.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -78,17 +80,67 @@ KillSwitchCheck = Callable[[asyncpg.Pool], Awaitable[bool]]
 PMStatusCheck = Callable[[asyncpg.Pool, str], Awaitable[str]]
 
 
-async def is_kill_switch_active(pool: asyncpg.Pool) -> bool:
-    """Read the kill_switch.active flag.
+# ---- Kill-switch cache ----------------------------------------------------
+# Plan §5 Step 3.7: ``is_kill_switch_active`` is hot-pathed by every order
+# submit and (post-K3.5) every trading-cycle iteration. The 1-second
+# in-process TTL caps DB chatter at one read per second per process.
+# Cross-process invalidation is impossible without pub/sub; the API
+# process invalidates synchronously after writes (see endpoints in
+# ``app.py``); the worker process picks up changes within the TTL.
+_KILL_SWITCH_CACHE_TTL_S: float = 1.0
 
-    Cached for 1s in-process to avoid hot-loop hammering — see plan
-    §5 Step 3.7. K3.4 ships the bare uncached read; the cache lives
-    in the K3.7 endpoint module (or here once 3.7 lands). Keeping it
-    simple here.
+
+@dataclass
+class _KillSwitchCacheEntry:
+    """Cached value + the monotonic timestamp it was read at."""
+
+    value: bool
+    fetched_at: float
+
+
+_kill_switch_cache: _KillSwitchCacheEntry | None = None
+_kill_switch_cache_lock = asyncio.Lock()
+
+
+async def is_kill_switch_active(pool: asyncpg.Pool) -> bool:
+    """Read the kill_switch.active flag, with a 1s in-process cache.
+
+    Plan §5 Step 3.7: cached for 1s in-process to avoid hot-loop
+    hammering when a trading cycle is firing every second. The cache
+    is process-local and there is no cross-process invalidation; the
+    1s TTL is the bound. The API process invalidates its own cache
+    via :func:`_invalidate_kill_switch_cache` from the toggle
+    endpoints so a flip is reflected immediately for any code path
+    in that process; the worker process picks the change up within
+    one TTL.
     """
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT active FROM kill_switch WHERE id = 1")
-    return bool(row and row["active"])
+    global _kill_switch_cache
+    now = time.monotonic()
+    cached = _kill_switch_cache
+    if cached is not None and (now - cached.fetched_at) < _KILL_SWITCH_CACHE_TTL_S:
+        return cached.value
+    async with _kill_switch_cache_lock:
+        # Double-check inside the lock — another waiter may have
+        # populated the cache while we were queued.
+        cached = _kill_switch_cache
+        if cached is not None and (time.monotonic() - cached.fetched_at) < _KILL_SWITCH_CACHE_TTL_S:
+            return cached.value
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT active FROM kill_switch WHERE id = 1")
+        value = bool(row and row["active"])
+        _kill_switch_cache = _KillSwitchCacheEntry(value=value, fetched_at=time.monotonic())
+        return value
+
+
+def _invalidate_kill_switch_cache() -> None:
+    """Drop the cached kill-switch value.
+
+    Called from the activate/deactivate endpoints after the DB write
+    succeeds so the API process picks up the new state immediately.
+    Tests use this to reset cache between cases.
+    """
+    global _kill_switch_cache
+    _kill_switch_cache = None
 
 
 async def check_pm_status(pool: asyncpg.Pool, pm_id: str) -> str:
@@ -170,6 +222,7 @@ __all__ = [
     "OrderRequest",
     "OrderResult",
     "PMStatusCheck",
+    "_invalidate_kill_switch_cache",
     "check_pm_status",
     "is_kill_switch_active",
     "submit_order",
