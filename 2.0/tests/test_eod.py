@@ -6,7 +6,7 @@ from the market-data adapter, and writes the close back through
 helpers so the closer's branching logic (close vs skip) is exercised
 without touching Postgres or parquet.
 
-Three cases:
+Cases:
 
 * ``test_closes_all_opens`` — three open trades, all priced. All
   three close, none skipped, journal contains the closes.
@@ -16,6 +16,12 @@ Three cases:
 * ``test_partial_failure_mix`` — three trades, one of which the
   market-data snapshot raises on; the other two close cleanly. The
   failed one is reported in ``skipped``; the rest land in ``closed``.
+* ``test_writes_summary_line_after_closing_trades`` — the per-run
+  SUMMARY rollup line names the right close/skip counts and the
+  summed PnL across all closed trades.
+* ``test_writes_summary_line_when_no_open_trades`` — an EOD pass
+  with zero open positions still writes a zero-valued SUMMARY line
+  so the operator can confirm the pass ran.
 """
 
 from __future__ import annotations
@@ -219,9 +225,11 @@ async def test_closes_all_opens(repo_stub: _RepoStubState, journal_capture: list
     for call in repo_stub.closed:
         assert call["outcome"] == "eod_close"
 
-    # Journal got three "CLOSED ..." lines.
-    assert len(journal_capture) == 3
-    assert all("CLOSED" in line for line in journal_capture)
+    # Journal got three "CLOSED ..." lines plus the summary rollup.
+    closed_lines = [line for line in journal_capture if "CLOSED" in line]
+    summary_lines = [line for line in journal_capture if "SUMMARY" in line]
+    assert len(closed_lines) == 3
+    assert len(summary_lines) == 1
 
 
 async def test_skips_missing_price(repo_stub: _RepoStubState, journal_capture: list[str]) -> None:
@@ -239,9 +247,11 @@ async def test_skips_missing_price(repo_stub: _RepoStubState, journal_capture: l
     assert "no market data" in result.skipped[0]
     # No close_trade call at all.
     assert repo_stub.closed == []
-    # Journal got a skip line.
-    assert len(journal_capture) == 1
-    assert "SKIPPED" in journal_capture[0]
+    # Journal got a skip line plus the summary rollup.
+    skip_lines = [line for line in journal_capture if "SKIPPED" in line]
+    summary_lines = [line for line in journal_capture if "SUMMARY" in line]
+    assert len(skip_lines) == 1
+    assert len(summary_lines) == 1
 
 
 async def test_partial_failure_mix(repo_stub: _RepoStubState, journal_capture: list[str]) -> None:
@@ -266,10 +276,57 @@ async def test_partial_failure_mix(repo_stub: _RepoStubState, journal_capture: l
     assert "BROKEN" in result.skipped[0]
     # Two close_trade calls; the broken symbol skipped.
     assert {c["trade_id"] for c in repo_stub.closed} == {1, 3}
-    # 2 closes + 1 skip = 3 journal lines.
-    assert len(journal_capture) == 3
+    # 2 closes + 1 skip + 1 summary rollup = 4 journal lines.
+    assert len(journal_capture) == 4
     closed_lines = [line for line in journal_capture if "CLOSED" in line]
     skipped_lines = [line for line in journal_capture if "SKIPPED" in line]
+    summary_lines = [line for line in journal_capture if "SUMMARY" in line]
     assert len(closed_lines) == 2
     assert len(skipped_lines) == 1
+    assert len(summary_lines) == 1
     assert "BROKEN" in skipped_lines[0]
+
+
+async def test_writes_summary_line_after_closing_trades(
+    repo_stub: _RepoStubState, journal_capture: list[str]
+) -> None:
+    """SUMMARY line names the right counts and total PnL."""
+    repo_stub.open_trades = [
+        _open_trade(trade_id=1, symbol="RELIANCE", entry=1400.0, qty=10),
+        _open_trade(trade_id=2, symbol="TCS", entry=3000.0, qty=5),
+    ]
+    market = _StubMarketData({"RELIANCE": 1500.0, "TCS": 2900.0})
+
+    result = await close_positions_for_pm(None, "pm1", market_data=market)
+
+    # closes: (1500-1400)*10 = 1000; (2900-3000)*5 = -500. total = 500.
+    assert sorted(result.closed) == [1, 2]
+    summary_lines = [line for line in journal_capture if "SUMMARY" in line]
+    assert len(summary_lines) == 1
+    summary = summary_lines[0]
+    assert "[eod]:" in summary
+    assert "closed=2" in summary
+    assert "skipped=0" in summary
+    assert "total_pnl=₹500" in summary
+
+
+async def test_writes_summary_line_when_no_open_trades(
+    repo_stub: _RepoStubState, journal_capture: list[str]
+) -> None:
+    """Empty open_trades still emits a zero-rollup SUMMARY line.
+
+    Operators rely on the summary to confirm the EOD pass ran. An
+    empty pass that wrote nothing would be indistinguishable from a
+    failure that crashed before any journal write.
+    """
+    repo_stub.open_trades = []
+    market = _StubMarketData({})
+
+    result = await close_positions_for_pm(None, "pm1", market_data=market)
+
+    assert result.closed == []
+    assert result.skipped == []
+    assert len(journal_capture) == 1
+    summary = journal_capture[0]
+    assert "[eod]:" in summary
+    assert "SUMMARY closed=0 skipped=0 total_pnl=₹0" in summary

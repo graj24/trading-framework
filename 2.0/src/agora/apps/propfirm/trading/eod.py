@@ -77,6 +77,30 @@ def _journal_skip(pm_id: str, symbol: str, trade_id: int, reason: str) -> None:
     )
 
 
+def _journal_summary(
+    pm_id: str,
+    closed_count: int,
+    skipped_count: int,
+    total_pnl: Decimal,
+) -> None:
+    """Append the per-run rollup line.
+
+    Plan §5 DoD #4 promised "a nightly summary lands in
+    /pms/<pm>/journals/<date>.md". The per-trade ``CLOSED`` /
+    ``SKIPPED`` lines satisfied the spirit, but an operator
+    skimming the journal still had to count by hand. This is the
+    one-line rollup. Always written, even when no trades were
+    open, so an empty EOD pass is distinguishable from a missing
+    one.
+    """
+    journal_append(
+        pm_id,
+        f"[{datetime.now(UTC).isoformat()}] [eod]: "
+        f"SUMMARY closed={closed_count} skipped={skipped_count} "
+        f"total_pnl=₹{total_pnl}",
+    )
+
+
 async def close_positions_for_pm(
     pool: asyncpg.Pool,
     pm_id: str,
@@ -112,6 +136,7 @@ async def close_positions_for_pm(
 
     open_trades = await trade_repo.list_open_trades(pool, pm_id)
     result = EodCloseResult(pm_id=pm_id)
+    total_pnl = Decimal(0)
 
     for trade in open_trades:
         symbol = trade.symbol
@@ -169,6 +194,13 @@ async def close_positions_for_pm(
             closed.pnl_inr,
         )
         result.closed.append(trade.id)
+        if closed.pnl_inr is not None:
+            total_pnl += closed.pnl_inr
+
+    # Always write the rollup, even when ``open_trades`` was empty —
+    # the dashboard / operator uses its presence to confirm the EOD
+    # workflow ran at all (vs failing before it could write anything).
+    _journal_summary(pm_id, len(result.closed), len(result.skipped), total_pnl)
 
     return result
 
